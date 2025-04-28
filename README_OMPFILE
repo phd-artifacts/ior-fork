@@ -1,0 +1,50 @@
+## 1. `aiori-OMPFile.c`: the backend
+
+The registration for the calls is in the file:
+file: src/aiori/aiori-ompfile.c
+
+## 2. How to Compile IOR with our backend
+
+### Add our Backend to the Source Tree
+
+- Place `aiori-OMPFile.c` into `src/aiori/`.
+- Add the include path and library path if needed.
+
+### Modify `src/aiori/Makefile.am`
+
+Append this line to include the newbackend source:
+
+```make
+libaiori_la_SOURCES += aiori/aiori-OMPFile.c
+```
+
+### Build IOR with Your libompfile
+
+Assuming your library is in `/path/to/libompfile.so` and headers in `/path/to/include`:
+
+```bash
+cmake .. -DCMAKE_C_FLAGS="-I/path/to/include" -DCMAKE_EXE_LINKER_FLAGS="-L/path/to -lompfile"
+make -j
+```
+
+You should now get the IOR binary in `build/src/ior`.
+
+---
+
+## Running a Minimal Example
+
+Run IOR with your backend like this:
+
+```bash
+mpirun -n 2 ./src/ior -a OMPFile -t 1m -b 4m -F -w -r -o testfile.dat
+```
+
+### What this does:
+- `-a OMPFile` → use your backend
+- `-t 1m` → transfer size 1 MiB
+- `-b 4m` → block size 4 MiB per rank
+- `-F` → file-per-process
+- `-w` → write test
+- `-r` → read test
+- `-o testfile.dat` → base output filename
+
