@@ -55,9 +55,9 @@ extraSOURCES  += aiori-HDF5.c
 extraLDADD    += -lhdf5 -lz
 endif
 
-if USE_OMPFILE_AIORI
-extraSOURCES += aiori-OMPFile
-endif
+#if USE_OMPFILE_AIORI
+libaiori_a_SOURCES += aiori-ompfile.c
+#endif
 
 if USE_IME_AIORI
 extraSOURCES  += aiori-IME.c

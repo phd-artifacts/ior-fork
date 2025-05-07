@@ -29,6 +29,11 @@ make -j
 
 You should now get the IOR binary in `build/src/ior`.
 
+
+register
+./sh_scripts/register
+configre cc=mpi_clang
+
 ---
 
 ## Running a Minimal Example

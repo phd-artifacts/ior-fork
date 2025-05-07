@@ -39,7 +39,8 @@ AX_PROG_CC_MPI(,,[
 
 AC_PROG_RANLIB
 # No reason not to require modern C at this point
-AC_PROG_CC_C99
+#AC_PROG_CC_C99
+AC_PROG_CC
 
 # Checks for libraries.
 
@@ -222,6 +223,15 @@ AM_COND_IF([USE_HDF5_AIORI],[
 	AC_CHECK_FUNCS([H5Fdelete])
 ])
 
+# Check for libompfile
+AC_CHECK_LIB([ompfile], [omp_file_open],
+             [have_ompfile=yes], [have_ompfile=no])
+
+AM_CONDITIONAL([HAVE_OMPFILE], [test "x$have_ompfile" = xyes])
+if test "x$have_ompfile" = xyes; then
+  AC_DEFINE([HAVE_OMPFILE], [1], [Build OMPFILE backend])
+  LIBS="$LIBS -lompfile"
+fi
 
 
 # HDFS support
@@ -556,4 +566,7 @@ AC_CONFIG_FILES([Makefile
                  src/test/Makefile
                  contrib/Makefile
                  doc/Makefile])
+
+AM_CONDITIONAL([USE_OMPFILE_AIORI], [true])
+
 AC_OUTPUT

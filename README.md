@@ -29,3 +29,10 @@ or on Read the Docs.
 
 [official IOR release]: https://github.com/hpc/ior/releases
 [official IOR/mdtest documentation]: http://ior.readthedocs.org/
+
+```bash
+./bootstrap
+CC=mpicxx
+./configure
+make -j
+```

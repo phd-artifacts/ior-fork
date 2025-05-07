@@ -17,6 +17,8 @@
 #ifndef _IOR_H
 #define _IOR_H
 
+#include <stdint.h> 
+
 #ifdef HAVE_CONFIG_H
 #  include "config.h"
 #endif
@@ -34,6 +36,8 @@
 #include "aiori.h"
 
 #include <mpi.h>
+
+#include <stdint.h>
 
 #ifndef MPI_FILE_NULL
 #   include <mpio.h>

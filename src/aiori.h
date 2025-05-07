@@ -21,6 +21,7 @@
 #include "iordef.h"                                     /* IOR Definitions */
 #include "aiori-debug.h"
 #include "option.h"
+#include <stdint.h>
 
 /*************************** D E F I N I T I O N S ****************************/
 
@@ -128,6 +129,7 @@ extern ior_aiori_t hdf5_aiori;
 extern ior_aiori_t hdfs_aiori;
 extern ior_aiori_t ime_aiori;
 extern ior_aiori_t mpiio_aiori;
+extern ior_aiori_t ompfile_aiori;
 extern ior_aiori_t ncmpi_aiori;
 extern ior_aiori_t posix_aiori;
 extern ior_aiori_t pmdk_aiori;
