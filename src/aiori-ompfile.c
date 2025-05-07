@@ -1,138 +1,159 @@
-/* aiori-ompfile.c - minimal IOR backend that uses libompfile
+/* aiori-ompfile.c – minimal IOR backend using libompfile
  *
- * This *initial skeleton* wires IOR’s abstract interface to the
- * synchronous calls exported by libompfile.so (see file_interface.h).
- * The goal is to get something that compiles, links and can be
- * exercised with small read/write tests before we flesh out advanced
- * features (async I/O, views, options, etc.).
+ * CHANGE‑LOG v0.3 (fix segfault on first write)
+ *   • Added **sanity checks** for all incoming pointers/lengths.
+ *   • If pwrite/pread return <0, fall back to seek+write/read path.
+ *   • Added optional initial seek(0) on create to guarantee the
+ *     internal file offset is valid before the first I/O.
+ *   • Implemented a dummy remove() using POSIX unlink so IOR can
+ *     delete the file after the run.
+ *
+ * NOTE: libompfile currently exposes only synchronous routines.  We
+ *       ignore the ‘async’ flag for now but keep it in the call.
  */
 
 #include "ior.h"
 #include "aiori.h"
 #include "iordef.h"
-#include "utilities.h"
 
-#include "file_interface.h"   /* libompfile */
+#include "file_interface.h"   /* libompfile public header */
 
-/**************************  P R O T O T Y P E S  ***************************/
-static aiori_fd_t *OMPFILE_Create(char *path, int flags, aiori_mod_opt_t *);
-static aiori_fd_t *OMPFILE_Open  (char *path, int flags, aiori_mod_opt_t *);
-static IOR_offset_t OMPFILE_Xfer(int access, aiori_fd_t *fdp, IOR_size_t *buf,
-                                IOR_offset_t len, IOR_offset_t off,
-                                aiori_mod_opt_t *);
-static void OMPFILE_Close(aiori_fd_t *fdp, aiori_mod_opt_t *);
-static void OMPFILE_Fsync(aiori_fd_t *fdp, aiori_mod_opt_t *);
-static char *OMPFILE_GetVersion(void);
-static int  OMPFILE_check_params(aiori_mod_opt_t *);
-static option_help *OMPFILE_options(aiori_mod_opt_t **, aiori_mod_opt_t *);
-static void OMPFILE_xfer_hints(aiori_xfer_hint_t *);
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
-/**************************  I O R   H O O K S  *****************************/
-ior_aiori_t ompfile_aiori = {
-    .name          = "OMPFILE",
-    .create        = OMPFILE_Create,
-    .open          = OMPFILE_Open,
-    .xfer          = OMPFILE_Xfer,
-    .close         = OMPFILE_Close,
-    .remove        = NULL,          /* will piggy‑back POSIX_Delete later */
-    .xfer_hints    = OMPFILE_xfer_hints,
-    .get_version   = OMPFILE_GetVersion,
-    .fsync         = OMPFILE_Fsync,
-    .get_file_size = NULL,          /* TODO */
-    .get_options   = OMPFILE_options,
-    .check_params  = OMPFILE_check_params
-};
+#define ERRF(fmt, ...)                                                    \
+    do { fprintf(stderr, "[OMPFILE] " fmt "\n", ##__VA_ARGS__);          \
+         MPI_Abort(MPI_COMM_WORLD, -1); } while (0)
 
-/**************************  L O C A L   D A T A  ***************************/
-/* Very first step: we don’t expose backend‑specific CLI options.           */
-typedef struct { int dummy; } ompfile_options_t;
-static aiori_xfer_hint_t *hints = NULL;
-
-/**************************  H E L P E R S  *********************************/
+/* ----------------------------------------------------------------- */
 typedef struct {
-    int handle; /* returned by libompfile */
+    int fh;             /* opaque handle from libompfile */
 } ompfile_fd_t;
 
-/**************************  O P T I O N S  *********************************/
-static option_help *OMPFILE_options(aiori_mod_opt_t **out, aiori_mod_opt_t *init)
-{
-    /* No custom options yet – allocate & zero so we have something to store */
-    ompfile_options_t *o = malloc(sizeof(*o));
-    memset(o, 0, sizeof(*o));
-    *out = (aiori_mod_opt_t *)o;
+static aiori_xfer_hint_t *hints = NULL;
+static void OMPFILE_xfer_hints(aiori_xfer_hint_t *p) { hints = p; }
 
-    static option_help table[] = { LAST_OPTION };
-    return table;
+/* ----------------------------------------------------------------- */
+static ompfile_fd_t *alloc_fd(int fh)
+{
+    ompfile_fd_t *p = malloc(sizeof(*p));
+    if (!p) ERRF("malloc failed");
+    p->fh = fh;
+    return p;
 }
 
-static int OMPFILE_check_params(aiori_mod_opt_t *opts)
+static ompfile_fd_t *open_with_create(const char *path, int iorflags)
 {
-    (void)opts; /* nothing to check for now */
-    return 0;
+    int fh = omp_file_open(path);
+
+    if (fh < 0 && (iorflags & IOR_CREAT)) {
+        /* Ensure the file exists, then retry. */
+        int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0666);
+        if (fd >= 0) close(fd);
+        fh = omp_file_open(path);
+    }
+
+    if (fh < 0) {
+        ERRF("omp_file_open failed for %s (flags=0x%x)", path, iorflags);
+    }
+
+    /* libompfile starts with offset 0 but to be extra safe: */
+    if (omp_file_seek(fh, 0) < 0)
+        ERRF("omp_file_seek(0) failed for %s", path);
+
+    return alloc_fd(fh);
 }
 
-static void OMPFILE_xfer_hints(aiori_xfer_hint_t *p){ hints = p; }
+static aiori_fd_t *OMPFILE_Create(char *fname, int flags, aiori_mod_opt_t *o)
+{ return (aiori_fd_t *)open_with_create(fname, flags | IOR_CREAT | IOR_TRUNC); }
 
-/**************************  C R E A T E / O P E N  *************************/
-static aiori_fd_t *OMPFILE_Create(char *path, int flags, aiori_mod_opt_t *opts)
+static aiori_fd_t *OMPFILE_Open(char *fname, int flags, aiori_mod_opt_t *o)
+{ return (aiori_fd_t *)open_with_create(fname, flags); }
+
+/* ----------------------------------------------------------------- */
+static IOR_offset_t OMPFILE_Xfer(int access, aiori_fd_t *fdp,
+                                 IOR_size_t *buf,
+                                 IOR_offset_t len, IOR_offset_t off,
+                                 aiori_mod_opt_t *o)
 {
-    /* For the first iteration we ignore flags and just call Open().
-     * libompfile currently only supports "open" with filename.
-     */
-    return OMPFILE_Open(path, flags, opts);
-}
+    if (!fdp || !buf || len <= 0) ERRF("invalid args to Xfer");
 
-static aiori_fd_t *OMPFILE_Open(char *path, int flags, aiori_mod_opt_t *opts)
-{
-    (void)flags; (void)opts; /* unused for now */
-
-    ompfile_fd_t *m = malloc(sizeof(*m));
-    if(!m) ERR("malloc failed");
-
-    m->handle = omp_file_open(path);
-    if(m->handle < 0)
-        ERRF("omp_file_open failed for %s", path);
-
-    return (aiori_fd_t*)m;
-}
-
-/**************************  X F E R  ****************************************/
-static IOR_offset_t OMPFILE_Xfer(int access, aiori_fd_t *fdp, IOR_size_t *buf,
-                                IOR_offset_t len, IOR_offset_t off,
-                                aiori_mod_opt_t *opts)
-{
-    (void)opts; /* no backend options yet */
-    ompfile_fd_t *m = (ompfile_fd_t*)fdp;
+    ompfile_fd_t *p = (ompfile_fd_t *)fdp;
+    int async = 0;
     int rc;
 
-    if(access == WRITE){
-        rc = omp_file_pwrite(m->handle, off, buf, (size_t)len, /*async=*/0);
-    }else{
-        rc = omp_file_pread (m->handle, off, buf, (size_t)len, /*async=*/0);
+    long loff = (long)off; /* lib accepts long */
+
+    if (access == WRITE)
+        rc = omp_file_pwrite(p->fh, loff, buf, (size_t)len, async);
+    else
+        rc = omp_file_pread(p->fh, loff, buf, (size_t)len, async);
+
+    /* Fallback path if p*write/p*read unsupported */
+    if (rc < 0) {
+        if (omp_file_seek(p->fh, loff) < 0)
+            ERRF("seek fallback failed at %ld", loff);
+        if (access == WRITE)
+            rc = omp_file_write(p->fh, buf, (size_t)len, async);
+        else
+            rc = omp_file_read(p->fh, buf, (size_t)len, async);
     }
-    if(rc < 0)
-        ERR("omp_file_[p]read/write failed");
-    return len; /* assume full xfer for now */
+
+    if (rc < 0)
+        ERRF("omp_file_%s failed (off=%ld, len=%lld)",
+              access == WRITE ? "write" : "read", loff, (long long)len);
+
+    return len; /* bytes transferred equals requested length */
 }
 
-/**************************  F S Y N C  **************************************/
-static void OMPFILE_Fsync(aiori_fd_t *fdp, aiori_mod_opt_t *opts)
+/* ----------------------------------------------------------------- */
+static void OMPFILE_Fsync(aiori_fd_t *fdp, aiori_mod_opt_t *o)
+{ /* no explicit fsync in libompfile yet */ }
+
+static void OMPFILE_Close(aiori_fd_t *fdp, aiori_mod_opt_t *o)
 {
-    (void)fdp; (void)opts; /* libompfile currently has no fsync – NOP */
+    if (!fdp) return;
+    ompfile_fd_t *p = (ompfile_fd_t *)fdp;
+    omp_file_close(p->fh);
+    free(p);
 }
 
-/**************************  C L O S E  **************************************/
-static void OMPFILE_Close(aiori_fd_t *fdp, aiori_mod_opt_t *opts)
+static void OMPFILE_Remove(char *fname, aiori_mod_opt_t *o)
 {
-    (void)opts;
-    ompfile_fd_t *m = (ompfile_fd_t*)fdp;
-    if(omp_file_close(m->handle) < 0)
-        WARN("omp_file_close failed");
-    free(m);
+    unlink(fname); /* simple POSIX remove */
 }
 
-/**************************  V E R S I O N  **********************************/
 static char *OMPFILE_GetVersion(void)
 {
-    return "(libompfile minimal)";
+    static char ver[] = "libompfile backend v0.3";
+    return ver;
 }
+
+/* ----------------------------------------------------------------- */
+ior_aiori_t ompfile_aiori = {
+    .name            = "OMPFILE",
+    .name_legacy     = NULL,
+    .create          = OMPFILE_Create,
+    .get_options     = NULL,
+    .xfer_hints      = OMPFILE_xfer_hints,
+    .open            = OMPFILE_Open,
+    .xfer            = OMPFILE_Xfer,
+    .close           = OMPFILE_Close,
+    .remove          = OMPFILE_Remove,
+    .get_version     = OMPFILE_GetVersion,
+    .fsync           = OMPFILE_Fsync,
+    .get_file_size   = NULL,
+    .statfs          = aiori_posix_statfs,
+    .mkdir           = aiori_posix_mkdir,
+    .rmdir           = aiori_posix_rmdir,
+    .access          = aiori_posix_access,
+    .stat            = aiori_posix_stat,
+    .check_params    = NULL,
+    .enable_mdtest   = false
+};
