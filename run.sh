@@ -4,6 +4,7 @@ set -e
 
 echo "Using clang:"
 /usr/bin/which clang
+export LIBOMPFILE_SCHEDULER="${LIBOMPFILE_SCHEDULER:-HEADNODE}"
 
 # Check if block_size or ior_mode are undefined or empty
 if [ -z "${block_size}" ] || [ -z "${ior_mode}" ]; then
