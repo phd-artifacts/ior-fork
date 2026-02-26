@@ -18,6 +18,9 @@
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <assert.h>
+#include <dlfcn.h>
 
 #include "file_interface.h"  /* libompfile API */
 
@@ -28,6 +31,11 @@
 typedef struct {
     int handle;  /* libompfile file descriptor */
 } ompfile_fd_t;
+
+static int ompfile_target_warmup_done = 0;
+static int ompfile_target_runtime_initialized = 0;
+typedef void (*tgt_rtl_deinit_fn_t)(void);
+static tgt_rtl_deinit_fn_t ompfile_tgt_rtl_deinit = NULL;
 
 /* ---------------------------------------------------------------------------
  * small helpers
@@ -41,6 +49,78 @@ static void *xmalloc(size_t n)
         exit(EXIT_FAILURE);
     }
     return p;
+}
+
+static int env_enabled(const char *name)
+{
+    const char *v = getenv(name);
+    return v && v[0] == '1' && v[1] == '\0';
+}
+
+/* Bootstrap libomptarget/plugin initialization in pure IOR processes before
+ * first OMPFILE call. This avoids relying on target-region execution in IOR.
+ */
+static void OMPFILE_Initialize(aiori_mod_opt_t *opt)
+{
+    (void)opt;
+    if (ompfile_target_warmup_done)
+        return;
+
+    if (!(env_enabled("LIBOMPFILE_MPP_OPEN") && env_enabled("LIBOMPFILE_MPP_IO"))) {
+        ompfile_target_warmup_done = 1;
+        return;
+    }
+
+    typedef void (*tgt_rtl_init_fn_t)(void);
+    typedef int (*omp_get_num_devices_fn_t)(void);
+    void *omptarget_handle = dlopen("libomptarget.so.20.0git",
+                                    RTLD_NOW | RTLD_GLOBAL);
+    if (!omptarget_handle)
+        omptarget_handle = dlopen("libomptarget.so", RTLD_NOW | RTLD_GLOBAL);
+
+    if (!omptarget_handle) {
+        fprintf(out_logfile,
+                "[ior-mpp] warning: failed to dlopen libomptarget: %s\n",
+                dlerror());
+        ompfile_target_warmup_done = 1;
+        return;
+    }
+
+    tgt_rtl_init_fn_t tgt_rtl_init =
+        (tgt_rtl_init_fn_t)dlsym(omptarget_handle, "__tgt_rtl_init");
+    ompfile_tgt_rtl_deinit =
+        (tgt_rtl_deinit_fn_t)dlsym(omptarget_handle, "__tgt_rtl_deinit");
+
+    if (tgt_rtl_init) {
+        tgt_rtl_init();
+        ompfile_target_runtime_initialized = 1;
+    } else {
+        fprintf(out_logfile,
+                "[ior-mpp] warning: __tgt_rtl_init symbol not found in libomptarget\n");
+    }
+
+    omp_get_num_devices_fn_t omp_get_num_devices_fn =
+        (omp_get_num_devices_fn_t)dlsym(omptarget_handle, "omp_get_num_devices");
+    if (omp_get_num_devices_fn) {
+        int num_devices = omp_get_num_devices_fn();
+        fprintf(out_logfile,
+                "[ior-mpp] libomptarget bootstrap completed devices=%d\n",
+                num_devices);
+    } else {
+        fprintf(out_logfile,
+                "[ior-mpp] warning: omp_get_num_devices symbol not found in libomptarget\n");
+    }
+
+    ompfile_target_warmup_done = 1;
+}
+
+static void OMPFILE_Finalize(aiori_mod_opt_t *opt)
+{
+    (void)opt;
+    if (ompfile_target_runtime_initialized && ompfile_tgt_rtl_deinit)
+        ompfile_tgt_rtl_deinit();
+
+    ompfile_target_runtime_initialized = 0;
 }
 
 /* ---------------------------------------------------------------------------
@@ -88,6 +168,7 @@ static IOR_offset_t OMPFILE_Xfer(int access, aiori_fd_t *fdp, IOR_size_t *buf,
 
     if (!m)
         return -1;
+    assert(m->handle >= 0);
 
     ssize_t rc;
     if (access == WRITE)
@@ -174,8 +255,8 @@ ior_aiori_t ompfile_aiori = {
     .rmdir          = aiori_posix_rmdir,
     .access         = aiori_posix_access,
     .stat           = aiori_posix_stat,
-    .initialize     = NULL,
-    .finalize       = NULL,
+    .initialize     = OMPFILE_Initialize,
+    .finalize       = OMPFILE_Finalize,
     .rename         = NULL,
     .get_options    = NULL,
     .check_params   = NULL,
