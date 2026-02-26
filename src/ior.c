@@ -20,6 +20,7 @@
 #include <math.h>
 #include <mpi.h>
 #include <string.h>
+#include <dlfcn.h>
 
 #if defined(HAVE_STRINGS_H)
 #include <strings.h>
@@ -69,6 +70,29 @@ static void ValidateTests(IOR_param_t * params, MPI_Comm com);
 static IOR_offset_t WriteOrRead(IOR_param_t *test, int rep, IOR_results_t *results,
                                 aiori_fd_t *fd, const int access,
                                 IOR_io_buffers *ioBuffers);
+
+static void BootstrapOpenMPRuntimeForMPP(void) {
+  typedef int (*omp_get_num_devices_fn_t)(void);
+  omp_get_num_devices_fn_t GetNumDevices =
+      (omp_get_num_devices_fn_t)dlsym(RTLD_DEFAULT, "omp_get_num_devices");
+
+  void *OmpHandle = NULL;
+  if (!GetNumDevices) {
+    OmpHandle = dlopen("libomp.so", RTLD_NOW | RTLD_GLOBAL);
+    if (!OmpHandle)
+      OmpHandle = dlopen("libomp.so.5", RTLD_NOW | RTLD_GLOBAL);
+    if (OmpHandle) {
+      GetNumDevices =
+          (omp_get_num_devices_fn_t)dlsym(OmpHandle, "omp_get_num_devices");
+    }
+  }
+
+  if (!GetNumDevices)
+    return;
+
+  int NumDevices = GetNumDevices();
+  fprintf(out_logfile, "[ior-mpp] omp_get_num_devices=%d\n", NumDevices);
+}
 
 static void ior_set_xfer_hints(IOR_param_t * p){
   aiori_xfer_hint_t * hints = & p->hints;
@@ -190,6 +214,10 @@ int ior_main(int argc, char **argv)
 {
     IOR_test_t *tests_head;
     IOR_test_t *tptr;
+    MPI_Comm ior_comm = MPI_COMM_WORLD;
+    int skip_mpi_finalize = 0;
+    const char *ior_comm_self_env = NULL;
+    int world_rank = 0;
 
     out_logfile = stdout;
     out_resultfile = stdout;
@@ -197,12 +225,32 @@ int ior_main(int argc, char **argv)
     /* start the MPI code */
     MPI_CHECK(MPI_Init(&argc, &argv), "cannot initialize MPI");
 
-    MPI_CHECK(MPI_Comm_rank(MPI_COMM_WORLD, &rank), "cannot get rank");
+    MPI_CHECK(MPI_Comm_rank(MPI_COMM_WORLD, &world_rank),
+              "cannot get rank");
+
+    /* MPP prototype mode:
+     * keep process in the full MPI world for libompfile MPP transport,
+     * but run IOR collectives on MPI_COMM_SELF to avoid waiting on proxy ranks.
+     */
+    ior_comm_self_env = getenv("IOR_MPI_COMM_SELF");
+    if (ior_comm_self_env != NULL &&
+        ior_comm_self_env[0] == '1' &&
+        ior_comm_self_env[1] == '\0') {
+            const char *bootstrap_env = getenv("IOR_MPP_BOOTSTRAP_OMP");
+            ior_comm = MPI_COMM_SELF;
+            skip_mpi_finalize = 1;
+            if (bootstrap_env != NULL && bootstrap_env[0] == '1' &&
+                bootstrap_env[1] == '\0') {
+                    BootstrapOpenMPRuntimeForMPP();
+            }
+    }
+
+    MPI_CHECK(MPI_Comm_rank(ior_comm, &rank), "cannot get rank");
 
     /*
      * check -h option from commandline without starting MPI;
      */
-    tests_head = ParseCommandLine(argc, argv, MPI_COMM_WORLD);
+    tests_head = ParseCommandLine(argc, argv, ior_comm);
 
     /* set error-handling */
     /*MPI_CHECK(MPI_Errhandler_set(mpi_comm_world, MPI_ERRORS_RETURN),
@@ -239,7 +287,13 @@ int ior_main(int argc, char **argv)
     /* display finish time */
     PrintTestEnds();
 
-    MPI_CHECK(MPI_Finalize(), "cannot finalize MPI");
+    if (!skip_mpi_finalize) {
+            MPI_CHECK(MPI_Finalize(), "cannot finalize MPI");
+    } else if (rank == 0) {
+            fprintf(out_logfile,
+                    "[ior-mpp] IOR_MPI_COMM_SELF=1 active; skipping MPI_Finalize in app rank (world rank %d)\n",
+                    world_rank);
+    }
 
     DestroyTests(tests_head);
 

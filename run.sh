@@ -2,14 +2,21 @@
 
 set -e
 
+REPO_ROOT="/scratch/rodrigo.freitas/io-playground"
+LLVM_BUILD_ROOT="${LLVM_BUILD_ROOT:-${LLVM_ROOT:-${REPO_ROOT}/llvm-infra/llvm-builds/apptainer-Debug}}"
+LLVM_INSTALL_ROOT="${LLVM_INSTALL_ROOT:-${LLVM_INSTALL_DIR:-${REPO_ROOT}/llvm-infra/llvm-installs/apptainer-Debug}}"
+OMPFILE_INC="${OMPFILE_INC:-${LLVM_INSTALL_ROOT}/include}"
+OMPFILE_LIB="${OMPFILE_LIB:-${LLVM_BUILD_ROOT}/runtimes/runtimes-bins/openmp/libompfile}"
+
 echo "Using clang:"
 /usr/bin/which clang
 export LIBOMPFILE_SCHEDULER="${LIBOMPFILE_SCHEDULER:-HEADNODE}"
+export LD_LIBRARY_PATH="/usr/local/mpich/lib:${OMPFILE_LIB}:${LD_LIBRARY_PATH:-}"
 
 # Check if block_size or ior_mode are undefined or empty
 if [ -z "${block_size}" ] || [ -z "${ior_mode}" ]; then
   echo "Error: Required environment variables 'block_size' or 'ior_mode' are not set."
-  return 1
+  exit 1
 fi
 
 export CFLAGS="-std=c99"
@@ -23,7 +30,7 @@ mkdir -p ./tmp
 
 if [ "${SKIP_COMPILE}" != "1" ]; then
   echo "Compiling the project..."
-  ./configure --enable-ompfile CC=mpi_clang
+  CPPFLAGS="-I${OMPFILE_INC}" LDFLAGS="-L${OMPFILE_LIB}" ./configure CC=mpi_clang
   make -j
 else
   echo "Skipping compilation as SKIP_COMPILE is set to 1."
