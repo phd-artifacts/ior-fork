@@ -31,4 +31,13 @@ This scope covers local IOR fork integration used by io-playground.
 
 ## MkDocs sync requirements
 - Any IOR integration behavior change should update MkDocs roadmap/status notes when relevant.
+- In each implementation step, update `docs/roadmap.md` and
+  append/update `docs/journal.md`.
+- Journal entries must use short meeting-style bullets:
+  - goal
+  - edited code (high-level)
+  - changes
+  - tests
+  - current limitations and unresolved problems
 - Document observed sorgan behavior changes (speedups/slowdowns, limits) when IOR results are used for decisions.
+- Always highlight current limitations and unresolved problems.

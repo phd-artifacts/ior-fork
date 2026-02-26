@@ -1,55 +1,76 @@
-## 1. `aiori-OMPFile.c`: the backend
+# IOR + libompfile (minimal prototype)
 
-The registration for the calls is in the file:
-file: src/aiori/aiori-ompfile.c
+## What is implemented
 
-## 2. How to Compile IOR with our backend
+- A minimal IOR backend adapter is available at `src/aiori-ompfile.c`.
+- The backend maps IOR open/read/write/close hooks to:
+  - `omp_file_open`
+  - `omp_file_pread`
+  - `omp_file_pwrite`
+  - `omp_file_close`
+- File-size checks used by IOR validation are implemented with `stat(2)`.
 
-### Add our Backend to the Source Tree
+## Minimal requirements
 
-- Place `aiori-OMPFile.c` into `src/aiori/`.
-- Add the include path and library path if needed.
+- LLVM runtime build with `libompfile` available.
+- MPI launcher/runtime (MPICH in this workspace).
+- `llvm-offload-mpi-proxy-device` built at:
+  - `${LLVM_ROOT}/bin/llvm-offload-mpi-proxy-device`
+- Environment setup:
+  - `source sh-scripts/set_env.sh <LLVM_ROOT>`
+  - `bash sh-scripts/register_mpi_clang.sh`
 
-### Modify `src/aiori/Makefile.am`
+## Compile
 
-Append this line to include the newbackend source:
-
-```make
-libaiori_la_SOURCES += aiori/aiori-OMPFile.c
-```
-
-### Build IOR with Your libompfile
-
-Assuming your library is in `/path/to/libompfile.so` and headers in `/path/to/include`:
+From repo root:
 
 ```bash
-cmake .. -DCMAKE_C_FLAGS="-I/path/to/include" -DCMAKE_EXE_LINKER_FLAGS="-L/path/to -lompfile"
+source sh-scripts/set_env.sh /scratch/rodrigo.freitas/io-playground/llvm-infra/llvm-builds/apptainer-Debug
+bash sh-scripts/register_mpi_clang.sh
+cd application/ior-fork
+CPPFLAGS="-I/scratch/rodrigo.freitas/io-playground/llvm-infra/llvm-installs/apptainer-Debug/include" \
+LDFLAGS="-L/scratch/rodrigo.freitas/io-playground/llvm-infra/llvm-builds/apptainer-Debug/runtimes/runtimes-bins/openmp/libompfile" \
+./configure CC=mpi_clang
 make -j
 ```
 
-You should now get the IOR binary in `build/src/ior`.
-
-
-register
-./sh_scripts/register
-configre cc=mpi_clang
-
----
-
-## Running a Minimal Example
-
-Run IOR with your backend like this:
+## Local smoke run (single process)
 
 ```bash
-mpirun -n 2 ./src/ior -a OMPFile -t 1m -b 4m -F -w -r -o testfile.dat
+cd application/ior-fork
+block_size=4m ior_mode=ompfile_mpi_io read_or_write=read ./run.sh
 ```
 
-### What this does:
-- `-a OMPFile` → use your backend
-- `-t 1m` → transfer size 1 MiB
-- `-b 4m` → block size 4 MiB per rank
-- `-F` → file-per-process
-- `-w` → write test
-- `-r` → read test
-- `-o testfile.dat` → base output filename
+## MPP prototype run (one app rank + proxy ranks)
 
+Use one IOR app rank plus proxy ranks in the same MPI world.
+
+Key behavior in this prototype:
+
+- App rank runs IOR with `IOR_MPI_COMM_SELF=1`.
+- Proxy ranks run `llvm-offload-mpi-proxy-device`.
+- This avoids IOR collectives blocking on proxy ranks.
+
+Slurm example:
+
+```bash
+sbatch /scratch/rodrigo.freitas/io-playground/application/ior-fork/run_sorgan_ior_mpp_minimal.sbatch
+```
+
+## MPI plan / execution flow
+
+1. Start one MPI job with `N` ranks.
+2. Reserve rank `N-1` as app rank; all lower ranks become proxy ranks.
+3. App rank executes IOR (`-a OMPFILE`) with `IOR_MPI_COMM_SELF=1`.
+4. Proxy ranks execute `llvm-offload-mpi-proxy-device`.
+5. libompfile MPP path routes OMPFILE operations from the app rank to proxy workers.
+
+## Current limitations
+
+- This is a minimal prototype for integration and bring-up.
+- IOR MPI collectives are intentionally scoped to `MPI_COMM_SELF` in MPP mode.
+- Performance/scaling results from this mode are not yet representative of full
+  multi-rank IOR semantics.
+- Current split-role MPP runs still fail in pure IOR processes with
+  `ompfile_mpp_init rc=-1` (`ActiveMPIPlugin` initialization path unresolved
+  without an offload-enabled app/runtime bootstrap).
