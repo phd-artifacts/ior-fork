@@ -22,6 +22,7 @@ SRUN_NODES="${SRUN_NODES:-2}"
 SRUN_TASKS="${SRUN_TASKS:-3}"
 OMPFILE_INC="${OMPFILE_INC:-${LLVM_INSTALL_ROOT}/include}"
 OMPFILE_LIB="${OMPFILE_LIB:-${LLVM_ROOT}/runtimes/runtimes-bins/openmp/libompfile}"
+OMP_RUNTIME_LIB="${OMP_RUNTIME_LIB:-${LLVM_ROOT}/runtimes/runtimes-bins/openmp/runtime/src}"
 
 cd "${REPO_ROOT}"
 
@@ -39,12 +40,12 @@ export LLVM_ROOT=${LLVM_ROOT} && \
 export LLVM_INSTALL_ROOT=${LLVM_INSTALL_ROOT} && \
 export REPO_ROOT=${REPO_ROOT} && \
 export PATH=/usr/local/mpich/bin:${PATH} && \
-export LD_LIBRARY_PATH=/usr/local/mpich/lib:${OMPFILE_LIB}:${LLVM_ROOT}/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH=/usr/local/mpich/lib:${OMP_RUNTIME_LIB}:${OMPFILE_LIB}:${LLVM_ROOT}/lib:${LD_LIBRARY_PATH:-}"
 
 if [[ "${BUILD_IOR}" == "1" || ! -x "${IOR_BIN}" ]]; then
   echo "[ior-mpp] building IOR backend binary"
   apptainer exec --userns --no-privs --bind /scratch/rodrigo.freitas/io-playground "${SIF_IMAGE}" \
-    bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && bash ${REPO_ROOT}/sh-scripts/register_mpi_clang.sh && CPPFLAGS='-I${OMPFILE_INC}' LDFLAGS='-L${OMPFILE_LIB}' ./configure CC=mpi_clang && make -j"
+    bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && bash ${REPO_ROOT}/sh-scripts/register_mpi_clang.sh && CFLAGS='-std=c99' CPPFLAGS='-I${OMPFILE_INC}' LDFLAGS='-L${OMPFILE_LIB}' ./configure CC=mpi_clang && make -j"
 fi
 
 if [[ ! -x "${IOR_BIN}" ]]; then

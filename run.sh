@@ -7,11 +7,12 @@ LLVM_BUILD_ROOT="${LLVM_BUILD_ROOT:-${LLVM_ROOT:-${REPO_ROOT}/llvm-infra/llvm-bu
 LLVM_INSTALL_ROOT="${LLVM_INSTALL_ROOT:-${LLVM_INSTALL_DIR:-${REPO_ROOT}/llvm-infra/llvm-installs/apptainer-Debug}}"
 OMPFILE_INC="${OMPFILE_INC:-${LLVM_INSTALL_ROOT}/include}"
 OMPFILE_LIB="${OMPFILE_LIB:-${LLVM_BUILD_ROOT}/runtimes/runtimes-bins/openmp/libompfile}"
+OMP_RUNTIME_LIB="${OMP_RUNTIME_LIB:-${LLVM_BUILD_ROOT}/runtimes/runtimes-bins/openmp/runtime/src}"
 
 echo "Using clang:"
 /usr/bin/which clang
 export LIBOMPFILE_SCHEDULER="${LIBOMPFILE_SCHEDULER:-HEADNODE}"
-export LD_LIBRARY_PATH="/usr/local/mpich/lib:${OMPFILE_LIB}:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/usr/local/mpich/lib:${OMP_RUNTIME_LIB}:${OMPFILE_LIB}:${LD_LIBRARY_PATH:-}"
 
 # Check if block_size or ior_mode are undefined or empty
 if [ -z "${block_size}" ] || [ -z "${ior_mode}" ]; then
@@ -19,7 +20,8 @@ if [ -z "${block_size}" ] || [ -z "${ior_mode}" ]; then
   exit 1
 fi
 
-export CFLAGS="-std=c99"
+BASE_CFLAGS="${CFLAGS:-}"
+export CFLAGS="-std=c99 ${BASE_CFLAGS}"
 
 source ../../sh-scripts/register_mpi_clang.sh
 

@@ -94,6 +94,26 @@ static void BootstrapOpenMPRuntimeForMPP(void) {
   fprintf(out_logfile, "[ior-mpp] omp_get_num_devices=%d\n", NumDevices);
 }
 
+static int envEnabled(const char *Name) {
+  const char *Value = getenv(Name);
+  return Value != NULL && Value[0] == '1' && Value[1] == '\0';
+}
+
+static const char *mpiThreadLevelToString(int Level) {
+  switch (Level) {
+  case MPI_THREAD_SINGLE:
+    return "MPI_THREAD_SINGLE";
+  case MPI_THREAD_FUNNELED:
+    return "MPI_THREAD_FUNNELED";
+  case MPI_THREAD_SERIALIZED:
+    return "MPI_THREAD_SERIALIZED";
+  case MPI_THREAD_MULTIPLE:
+    return "MPI_THREAD_MULTIPLE";
+  default:
+    return "MPI_THREAD_UNKNOWN";
+  }
+}
+
 static void ior_set_xfer_hints(IOR_param_t * p){
   aiori_xfer_hint_t * hints = & p->hints;
   hints->dryRun = p->dryRun;
@@ -218,12 +238,29 @@ int ior_main(int argc, char **argv)
     int skip_mpi_finalize = 0;
     const char *ior_comm_self_env = NULL;
     int world_rank = 0;
+    int required_thread_level = MPI_THREAD_SINGLE;
+    int provided_thread_level = MPI_THREAD_SINGLE;
 
     out_logfile = stdout;
     out_resultfile = stdout;
 
+    if (envEnabled("LIBOMPFILE_MPP_OPEN") && envEnabled("LIBOMPFILE_MPP_IO"))
+        required_thread_level = MPI_THREAD_MULTIPLE;
+
     /* start the MPI code */
-    MPI_CHECK(MPI_Init(&argc, &argv), "cannot initialize MPI");
+    MPI_CHECK(MPI_Init_thread(&argc, &argv, required_thread_level,
+                              &provided_thread_level),
+              "cannot initialize MPI");
+
+    if (required_thread_level == MPI_THREAD_MULTIPLE &&
+        provided_thread_level < MPI_THREAD_MULTIPLE) {
+            fprintf(stderr,
+                    "[ior-mpp] error: MPI thread level is %s, but "
+                    "LIBOMPFILE_MPP_OPEN=1 and LIBOMPFILE_MPP_IO=1 require %s.\n",
+                    mpiThreadLevelToString(provided_thread_level),
+                    mpiThreadLevelToString(MPI_THREAD_MULTIPLE));
+            MPI_Abort(MPI_COMM_WORLD, 1);
+    }
 
     MPI_CHECK(MPI_Comm_rank(MPI_COMM_WORLD, &world_rank),
               "cannot get rank");
