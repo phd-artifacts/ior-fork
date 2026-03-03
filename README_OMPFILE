@@ -41,6 +41,47 @@ cd application/ior-fork
 block_size=4m ior_mode=ompfile_mpi_io read_or_write=read ./run.sh
 ```
 
+## Backend comparison on IOR (MPIIO baseline)
+
+Use IOR-native backends as the reference, then compare `OMPFILE` against them.
+
+Local compare in Apptainer:
+
+```bash
+apptainer exec --userns --no-privs --bind /scratch/rodrigo.freitas/io-playground \
+  /scratch/rodrigo.freitas/io-playground/sifs/ompc-base_latest.sif \
+  bash -lc '
+    cd /scratch/rodrigo.freitas/io-playground/application/ior-fork
+    SKIP_COMPILE=1 \
+    IOR_COMPARE_NP=4 \
+    IOR_COMPARE_REPEATS=2 \
+    IOR_COMPARE_BLOCK_SIZE=4m \
+    IOR_COMPARE_TRANSFER_SIZE=256k \
+    IOR_COMPARE_SEGMENTS=8 \
+    IOR_COMPARE_MODES=MPIIO,POSIX,OMPFILE_MPI \
+    ./run_backend_compare.sh
+  '
+```
+
+The compare runner prints:
+
+- per-mode average write/read bandwidth and mean time
+- speedup ratios and deltas versus IOR `MPIIO`
+- raw CSV + per-run logs in `application/ior-fork/tmp/backend-compare/`
+
+Distributed compare on Slurm (2 nodes by default):
+
+```bash
+sbatch /scratch/rodrigo.freitas/io-playground/application/ior-fork/run_sorgan_ior_backend_compare.sbatch
+```
+
+Inspect output:
+
+```bash
+sacct -j <job_id> --format=JobID,State,Elapsed,ExitCode
+grep -E '\[ior-backend-cmp\]|Summary of all tests|api                 :' ior-backend-cmp-<job_id>.out
+```
+
 ## MPP prototype run (one app rank + proxy ranks)
 
 Use one IOR app rank plus proxy ranks in the same MPI world.

@@ -50,28 +50,35 @@ else
   exit 1
 fi
 
-if [ "${ior_mode}" = "posix" ]; then
+output_prefix="${ior_backend:-${ior_mode}}"
+
+if [ "${ior_mode}" = "mpiio" ]; then
+  echo "IOR mode: MPIIO"
+
+  mpirun -n 1 ./src/ior -a MPIIO $read_or_write_flag -b $block_size -t 16k -s 100 -o ./tmp/$output_prefix_$block_size.dat
+
+elif [ "${ior_mode}" = "posix" ]; then
   echo "IOR mode: POSIX"
 
-  mpirun -n 1 ./src/ior -a POSIX $read_or_write_flag -b $block_size -t 16k -s 100 -o ./tmp/$ior_backend_$block_size.dat
+  mpirun -n 1 ./src/ior -a POSIX $read_or_write_flag -b $block_size -t 16k -s 100 -o ./tmp/$output_prefix_$block_size.dat
 
 elif [ "${ior_mode}" = "ompfile_posix" ]; then
   echo "IOR mode: OMPFile POSIX"
   export LIBOMPFILE_BACKEND=POSIX
-  mpirun -n 1 ./src/ior -a OMPFILE $read_or_write_flag -b $block_size -t 16k -s 100 -o ./tmp/$ior_backend_$block_size.dat
+  mpirun -n 1 ./src/ior -a OMPFILE $read_or_write_flag -b $block_size -t 16k -s 100 -o ./tmp/$output_prefix_$block_size.dat
 
 elif [ "${ior_mode}" = "ompfile_io_uring" ]; then
   echo "IOR mode: OMPFile IO_URING"
   export LIBOMPFILE_BACKEND="IO_URING"
-  mpirun -n 1 ./src/ior -a OMPFILE $read_or_write_flag -b $block_size -t 16k -s 100 -o ./tmp/$ior_backend_$block_size.dat
+  mpirun -n 1 ./src/ior -a OMPFILE $read_or_write_flag -b $block_size -t 16k -s 100 -o ./tmp/$output_prefix_$block_size.dat
 
 elif [ "${ior_mode}" = "ompfile_mpi_io" ]; then
   echo "IOR mode: OMPFile MPI I/O"
   export LIBOMPFILE_BACKEND="MPI"
-  mpirun -n 1 ./src/ior -a OMPFILE $read_or_write_flag -b $block_size -t 16k -s 100 -o ./tmp/$ior_backend_$block_size.dat
+  mpirun -n 1 ./src/ior -a OMPFILE $read_or_write_flag -b $block_size -t 16k -s 100 -o ./tmp/$output_prefix_$block_size.dat
 
 else
-  echo "Error: Invalid IOR mode '${ior_mode}'. Valid options are: posix, ompfile_posix, ompfile_io_uring, ompfile_mpi_io."
+  echo "Error: Invalid IOR mode '${ior_mode}'. Valid options are: mpiio, posix, ompfile_posix, ompfile_io_uring, ompfile_mpi_io."
   exit 1
 fi
 

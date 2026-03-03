@@ -66,13 +66,20 @@ static void OMPFILE_Initialize(aiori_mod_opt_t *opt)
     if (ompfile_target_warmup_done)
         return;
 
-    if (!(env_enabled("LIBOMPFILE_MPP_OPEN") && env_enabled("LIBOMPFILE_MPP_IO"))) {
+    const int mpp_open_enabled = env_enabled("LIBOMPFILE_MPP_OPEN");
+    const int mpp_io_enabled = env_enabled("LIBOMPFILE_MPP_IO");
+    if (!(mpp_open_enabled && mpp_io_enabled)) {
+        fprintf(out_logfile,
+                "[ior-mpp] bootstrap skipped: requires LIBOMPFILE_MPP_OPEN=1 and LIBOMPFILE_MPP_IO=1 (open=%d io=%d)\n",
+                mpp_open_enabled, mpp_io_enabled);
         ompfile_target_warmup_done = 1;
         return;
     }
 
     typedef void (*tgt_rtl_init_fn_t)(void);
     typedef int (*omp_get_num_devices_fn_t)(void);
+    fprintf(out_logfile,
+            "[ior-mpp] bootstrap begin (trying to load libomptarget)\n");
     void *omptarget_handle = dlopen("libomptarget.so.20.0git",
                                     RTLD_NOW | RTLD_GLOBAL);
     if (!omptarget_handle)
