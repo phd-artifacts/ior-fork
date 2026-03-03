@@ -50,3 +50,6 @@ build/
 doc/doxygen/build
 doc/sphinx/_*/
 !doc/sphinx/Makefile
+
+# Generated benchmark artifacts
+tmp/
