@@ -77,7 +77,6 @@ static void OMPFILE_Initialize(aiori_mod_opt_t *opt)
     }
 
     typedef void (*tgt_rtl_init_fn_t)(void);
-    typedef int (*omp_get_num_devices_fn_t)(void);
     fprintf(out_logfile,
             "[ior-mpp] bootstrap begin (trying to load libomptarget)\n");
     void *omptarget_handle = dlopen("libomptarget.so.20.0git",
@@ -106,17 +105,8 @@ static void OMPFILE_Initialize(aiori_mod_opt_t *opt)
                 "[ior-mpp] warning: __tgt_rtl_init symbol not found in libomptarget\n");
     }
 
-    omp_get_num_devices_fn_t omp_get_num_devices_fn =
-        (omp_get_num_devices_fn_t)dlsym(omptarget_handle, "omp_get_num_devices");
-    if (omp_get_num_devices_fn) {
-        int num_devices = omp_get_num_devices_fn();
-        fprintf(out_logfile,
-                "[ior-mpp] libomptarget bootstrap completed devices=%d\n",
-                num_devices);
-    } else {
-        fprintf(out_logfile,
-                "[ior-mpp] warning: omp_get_num_devices symbol not found in libomptarget\n");
-    }
+    fprintf(out_logfile,
+            "[ior-mpp] libomptarget bootstrap completed\n");
 
     ompfile_target_warmup_done = 1;
 }

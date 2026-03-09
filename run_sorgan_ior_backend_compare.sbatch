@@ -19,9 +19,11 @@ LLVM_INSTALL_ROOT="${LLVM_INSTALL_ROOT:-${REPO_ROOT}/llvm-infra/llvm-installs/ap
 IOR_DIR="${IOR_DIR:-${REPO_ROOT}/application/ior-fork}"
 IOR_BIN="${IOR_BIN:-${IOR_DIR}/src/ior}"
 COMPARE_SCRIPT="${COMPARE_SCRIPT:-${IOR_DIR}/run_backend_compare.sh}"
+MPP_RUNNER="${MPP_RUNNER:-${IOR_DIR}/run_mpp_minimal.sh}"
 OMPFILE_INC="${OMPFILE_INC:-${LLVM_INSTALL_ROOT}/include}"
 OMPFILE_LIB="${OMPFILE_LIB:-${LLVM_ROOT}/runtimes/runtimes-bins/openmp/libompfile}"
 OMP_RUNTIME_LIB="${OMP_RUNTIME_LIB:-${LLVM_ROOT}/runtimes/runtimes-bins/openmp/runtime/src}"
+PROXY_BIN="${PROXY_BIN:-${LLVM_ROOT}/bin/llvm-offload-mpi-proxy-device}"
 
 COMPARE_MODES_RAW="${IOR_COMPARE_MODES:-MPIIO,POSIX,OMPFILE_MPI}"
 COMPARE_REPEATS="${IOR_COMPARE_REPEATS:-3}"
@@ -72,16 +74,39 @@ if [[ ! -x "${COMPARE_SCRIPT}" ]]; then
   echo "Error: compare script not found: ${COMPARE_SCRIPT}" >&2
   exit 1
 fi
+if [[ ! -x "${MPP_RUNNER}" ]]; then
+  echo "Error: MPP runner not found: ${MPP_RUNNER}" >&2
+  exit 1
+fi
+if [[ ! -x "${PROXY_BIN}" ]]; then
+  echo "Error: proxy binary not found: ${PROXY_BIN}" >&2
+  exit 1
+fi
 
 case "${COMPARE_RW}" in
-  rw) IO_FLAGS="-w -r" ;;
-  read) IO_FLAGS="-r" ;;
-  write) IO_FLAGS="-w" ;;
+  rw)
+    IO_FLAGS="-w -r"
+    WRITE_ENABLED=1
+    READ_ENABLED=1
+    ;;
+  read)
+    IO_FLAGS="-r"
+    WRITE_ENABLED=0
+    READ_ENABLED=1
+    ;;
+  write)
+    IO_FLAGS="-w"
+    WRITE_ENABLED=1
+    READ_ENABLED=0
+    ;;
   *)
     echo "Error: IOR_COMPARE_RW must be one of: rw, read, write." >&2
     exit 1
     ;;
 esac
+
+MODE_LIST_COMPACT="${COMPARE_MODES_RAW//[[:space:]]/}"
+MODE_LIST_CSV=",${MODE_LIST_COMPACT^^},"
 
 COMMON_ENV="source ${REPO_ROOT}/sh-scripts/set_env.sh ${LLVM_ROOT} && \
 export REPO_ROOT=${REPO_ROOT} && \
@@ -110,7 +135,7 @@ EOF
 echo "[ior-backend-cmp] allocated nodes: ${SLURM_JOB_NODELIST}"
 scontrol show hostnames "${SLURM_JOB_NODELIST}" | sed 's/^/[ior-backend-cmp] node /'
 echo "[ior-backend-cmp] distributed reachability check:"
-srun --mpi=pmi2 --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${COMPARE_TASKS}" /bin/hostname -s | sort -u | sed 's/^/[ior-backend-cmp] reached /'
+srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${COMPARE_TASKS}" /bin/hostname -s | sort -u | sed 's/^/[ior-backend-cmp] reached /'
 
 extract_summary_field() {
   local log_file="$1"
@@ -120,6 +145,98 @@ extract_summary_field() {
     /^Summary of all tests:/ {in_summary=1; next}
     in_summary && $1 == op {print $col; exit}
   ' "${log_file}"
+}
+
+scale_size_by_factor() {
+  local size_token_raw="$1"
+  local factor="$2"
+  local size_token="${size_token_raw,,}"
+  local suffix="${size_token: -1}"
+  local number_part="${size_token}"
+  local multiplier=1
+
+  case "${suffix}" in
+    k)
+      multiplier=1024
+      number_part="${size_token%k}"
+      ;;
+    m)
+      multiplier=$((1024 * 1024))
+      number_part="${size_token%m}"
+      ;;
+    g)
+      multiplier=$((1024 * 1024 * 1024))
+      number_part="${size_token%g}"
+      ;;
+  esac
+
+  if [[ ! "${number_part}" =~ ^[0-9]+$ ]]; then
+    echo "Error: unsupported size token '${size_token_raw}'" >&2
+    exit 1
+  fi
+
+  echo $((number_part * multiplier * factor))
+}
+
+prepare_read_input() {
+  local data_path="$1"
+  local prep_log="$2"
+
+  echo "[ior-backend-cmp] preparing read input with MPIIO writer -> ${data_path}"
+  srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${COMPARE_TASKS}" \
+    "${APPTAINER_BIN}" exec --userns --no-privs --bind /scratch/rodrigo.freitas/io-playground "${SIF_IMAGE}" \
+    bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && unset LIBOMPFILE_BACKEND LIBOMPFILE_SCHEDULER LIBOMPFILE_MPP_OPEN LIBOMPFILE_MPP_IO LIBOMPFILE_MPP_PING LIBOMPFILE_OPT_TWO_PHASE LIBOMPFILE_OPT_OPEN_CACHE LIBOMPFILE_OPT_OPEN_CACHE_KEEP_OPEN LIBOMPFILE_OPT_STATS UCX_TLS UCX_POSIX_USE_PROC_LINK; ${IOR_BIN} -a MPIIO -w -k -t ${COMPARE_TRANSFER_SIZE} -b ${COMPARE_BLOCK_SIZE} -s ${COMPARE_SEGMENTS} -i 1 -F -o ${data_path}" \
+    > "${prep_log}" 2>&1
+}
+
+run_standard_case() {
+  local mode_env_stmt="$1"
+  local api="$2"
+  local data_path="$3"
+  local log_file="$4"
+
+  srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${COMPARE_TASKS}" \
+    "${APPTAINER_BIN}" exec --userns --no-privs --bind /scratch/rodrigo.freitas/io-playground "${SIF_IMAGE}" \
+    bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && ${mode_env_stmt} ${IOR_BIN} -a ${api} ${IO_FLAGS} -t ${COMPARE_TRANSFER_SIZE} -b ${COMPARE_BLOCK_SIZE} -s ${COMPARE_SEGMENTS} -i ${COMPARE_ITERATIONS} -F -o ${data_path}" \
+    > "${log_file}" 2>&1
+}
+
+run_ompfile_mpp_case() {
+  local data_path="$1"
+  local log_file="$2"
+  local distributed_visible_ranks=$((COMPARE_TASKS - 1))
+  local ompfile_block_size_bytes
+
+  if (( distributed_visible_ranks < 1 )); then
+    echo "Error: distributed OMPFILE+MPP compare requires at least 2 total MPI tasks." >&2
+    exit 1
+  fi
+
+  ompfile_block_size_bytes="$(scale_size_by_factor "${COMPARE_BLOCK_SIZE}" "${COMPARE_TASKS}")"
+
+  srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${COMPARE_TASKS}" \
+    "${APPTAINER_BIN}" exec --userns --no-privs --bind /scratch/rodrigo.freitas/io-playground "${SIF_IMAGE}" \
+    bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && \
+      export IOR_BIN=${IOR_BIN} && \
+      export PROXY_BIN=${PROXY_BIN} && \
+      export APP_RANK=$((SLURM_NTASKS - 1)) && \
+      export IOR_MPP_EXPECT_VISIBLE_DEVICES=${distributed_visible_ranks} && \
+      export PROXY_EXIT_TIMEOUT_SEC=20 && \
+      export LIBOMPFILE_BACKEND=MPI && \
+      export LIBOMPFILE_SCHEDULER=${OMPFILE_SCHEDULER} && \
+      export LIBOMPFILE_MPP_OPEN=1 && \
+      export LIBOMPFILE_MPP_IO=1 && \
+      export UCX_TLS=${UCX_TLS:-tcp,self} && \
+      export UCX_POSIX_USE_PROC_LINK=${UCX_POSIX_USE_PROC_LINK:-n} && \
+      export OMPFILE_EFFECTIVE_BLOCK_SIZE_BYTES=${ompfile_block_size_bytes} && \
+      export OMPFILE_IOR_ARGS='-a OMPFILE ${IO_FLAGS} -t ${COMPARE_TRANSFER_SIZE} -b ${ompfile_block_size_bytes} -s ${COMPARE_SEGMENTS} -i ${COMPARE_ITERATIONS} -F -o ${data_path}' && \
+      host_name=\$(hostname -s); \
+      if [ \"\${SLURM_PROCID}\" -eq \$((SLURM_NTASKS - 1)) ]; then \
+        echo \"[ior-backend-cmp][rank-map] rank=\${SLURM_PROCID} role=app host=\${host_name}\"; \
+      else \
+        echo \"[ior-backend-cmp][rank-map] rank=\${SLURM_PROCID} role=proxy host=\${host_name}\"; \
+      fi; \
+      bash ${MPP_RUNNER}" > "${log_file}" 2>&1
 }
 
 run_case() {
@@ -171,15 +288,21 @@ run_case() {
   local lower_mode="${mode,,}"
   local data_path="${COMPARE_OUTDIR}/${lower_mode}-r${repeat_id}.dat"
   local log_file="${COMPARE_OUTDIR}/${lower_mode}-r${repeat_id}.log"
+  local prep_log="${COMPARE_OUTDIR}/${lower_mode}-r${repeat_id}-prep.log"
   if [[ "${COMPARE_CLEAN_DATA}" == "1" ]]; then
-    rm -f "${data_path}" "${data_path}".*
+    rm -f "${data_path}" "${data_path}".* "${prep_log}"
+  fi
+
+  if (( READ_ENABLED && ! WRITE_ENABLED )); then
+    prepare_read_input "${data_path}" "${prep_log}"
   fi
 
   echo "[ior-backend-cmp] mode=${mode} repeat=${repeat_id} mpp=${mpp_enabled_for_case}"
-  srun --mpi=pmi2 --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${COMPARE_TASKS}" \
-    "${APPTAINER_BIN}" exec --userns --no-privs --bind /scratch/rodrigo.freitas/io-playground "${SIF_IMAGE}" \
-    bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && ${mode_env_stmt} ${IOR_BIN} -a ${api} ${IO_FLAGS} -t ${COMPARE_TRANSFER_SIZE} -b ${COMPARE_BLOCK_SIZE} -s ${COMPARE_SEGMENTS} -i ${COMPARE_ITERATIONS} -F -o ${data_path}" \
-    > "${log_file}" 2>&1
+  if [[ "${mode}" == "OMPFILE_MPI" && "${OMPFILE_RUN_MPP}" == "1" ]]; then
+    run_ompfile_mpp_case "${data_path}" "${log_file}"
+  else
+    run_standard_case "${mode_env_stmt}" "${api}" "${data_path}" "${log_file}"
+  fi
 
   local write_bw
   local read_bw
@@ -188,10 +311,14 @@ run_case() {
   local flightplan_state="na"
   local sched_fallback_count=0
   local mpp_shim_missing_count=0
-  write_bw="$(extract_summary_field "${log_file}" "write" 2)"
-  read_bw="$(extract_summary_field "${log_file}" "read" 2)"
-  write_s="$(extract_summary_field "${log_file}" "write" 10)"
-  read_s="$(extract_summary_field "${log_file}" "read" 10)"
+  if (( WRITE_ENABLED )); then
+    write_bw="$(extract_summary_field "${log_file}" "write" 2)"
+    write_s="$(extract_summary_field "${log_file}" "write" 10)"
+  fi
+  if (( READ_ENABLED )); then
+    read_bw="$(extract_summary_field "${log_file}" "read" 2)"
+    read_s="$(extract_summary_field "${log_file}" "read" 10)"
+  fi
 
   if [[ "${api}" == "OMPFILE" ]]; then
     sched_fallback_count="$(grep -c "HEADNODE scheduler request failed" "${log_file}" || true)"
@@ -210,19 +337,39 @@ run_case() {
       local mpp_shim_open_failed_count
       local mpp_disabled_sched_count
       local mpp_bootstrap_ok_count
+      local visible_rank_match_count
       mpp_init_fail_count="$(grep -c "MPP scheduler request aborted because MPP init failed" "${log_file}" || true)"
       mpp_open_failed_count="$(grep -c "MPP open failed" "${log_file}" || true)"
       mpp_shim_open_failed_count="$(grep -c "MPP shim open failed" "${log_file}" || true)"
       mpp_disabled_sched_count="$(grep -c "HEADNODE scheduler requested but MPP remote-only mode is disabled" "${log_file}" || true)"
-      mpp_bootstrap_ok_count="$(grep -Ec "\\[ior-mpp\\] libomptarget bootstrap completed devices=[1-9][0-9]*" "${log_file}" || true)"
-      if (( mpp_init_fail_count > 0 || mpp_open_failed_count > 0 || mpp_shim_open_failed_count > 0 || mpp_shim_missing_count > 0 || mpp_disabled_sched_count > 0 || mpp_bootstrap_ok_count == 0 )); then
+      mpp_bootstrap_ok_count="$(grep -Ec "\\[ior-mpp\\] libomptarget bootstrap completed" "${log_file}" || true)"
+      visible_rank_match_count="$(grep -Ec "\\[ior-mpp\\] visible_distributed_ranks=$((COMPARE_TASKS - 1)) expected_visible=$((COMPARE_TASKS - 1))" "${log_file}" || true)"
+      if (( mpp_init_fail_count > 0 || mpp_open_failed_count > 0 || mpp_shim_open_failed_count > 0 || mpp_shim_missing_count > 0 || mpp_disabled_sched_count > 0 || mpp_bootstrap_ok_count == 0 || visible_rank_match_count == 0 )); then
         echo "Error: OMPFILE+MPP strict mode failed for ${mode} repeat=${repeat_id}." >&2
-        echo "  bootstrap_ok=${mpp_bootstrap_ok_count} init_fail=${mpp_init_fail_count} open_fail=${mpp_open_failed_count} shim_open_fail=${mpp_shim_open_failed_count} shim_missing=${mpp_shim_missing_count} sched_disabled=${mpp_disabled_sched_count}" >&2
+        echo "  bootstrap_ok=${mpp_bootstrap_ok_count} visible_match=${visible_rank_match_count} init_fail=${mpp_init_fail_count} open_fail=${mpp_open_failed_count} shim_open_fail=${mpp_shim_open_failed_count} shim_missing=${mpp_shim_missing_count} sched_disabled=${mpp_disabled_sched_count}" >&2
         exit 1
       fi
     fi
   fi
-  if [[ -z "${write_bw}" || -z "${read_bw}" || -z "${write_s}" || -z "${read_s}" ]]; then
+  if (( WRITE_ENABLED )) && [[ -z "${write_bw}" || -z "${write_s}" ]]; then
+    echo "Error: failed to parse write summary metrics from ${log_file}" >&2
+    exit 1
+  fi
+  if (( READ_ENABLED )) && [[ -z "${read_bw}" || -z "${read_s}" ]]; then
+    echo "Error: failed to parse read summary metrics from ${log_file}" >&2
+    exit 1
+  fi
+
+  if (( ! WRITE_ENABLED )); then
+    write_bw=""
+    write_s=""
+  fi
+  if (( ! READ_ENABLED )); then
+    read_bw=""
+    read_s=""
+  fi
+
+  if (( WRITE_ENABLED == 0 && READ_ENABLED == 0 )); then
     echo "Error: failed to parse summary metrics from ${log_file}" >&2
     exit 1
   fi
@@ -237,7 +384,11 @@ echo "[ior-backend-cmp] output dir: ${COMPARE_OUTDIR}"
 echo "[ior-backend-cmp] modes: ${COMPARE_MODES_RAW}"
 echo "[ior-backend-cmp] workload: tasks=${COMPARE_TASKS} block=${COMPARE_BLOCK_SIZE} xfer=${COMPARE_TRANSFER_SIZE} segments=${COMPARE_SEGMENTS} iter=${COMPARE_ITERATIONS} rw=${COMPARE_RW}"
 echo "[ior-backend-cmp] runtime policy: ompfile_scheduler=${OMPFILE_SCHEDULER} ompfile_run_mpp=${OMPFILE_RUN_MPP} ompfile_require_mpp=${OMPFILE_REQUIRE_MPP}"
-echo "[ior-backend-cmp] topology: this script launches IOR on all MPI ranks (no dedicated proxy ranks)."
+if [[ "${MODE_LIST_CSV}" == *",OMPFILE_MPI,"* && "${OMPFILE_RUN_MPP}" == "1" ]]; then
+  echo "[ior-backend-cmp] topology: MPIIO/POSIX run IOR on all ${COMPARE_TASKS} MPI ranks; OMPFILE+MPP runs 1 app rank + $((COMPARE_TASKS - 1)) proxy ranks in the same MPI_COMM_WORLD."
+else
+  echo "[ior-backend-cmp] topology: this script launches IOR on all MPI ranks (no dedicated proxy ranks)."
+fi
 if [[ "${OMPFILE_RUN_MPP}" == "0" ]]; then
   echo "[ior-backend-cmp] note: OMPFILE mode runs without remote-only MPP in this compare lane."
 fi
@@ -259,53 +410,137 @@ done
 
 echo
 echo "[ior-backend-cmp] raw results: ${SUMMARY_CSV}"
-echo "[ior-backend-cmp] per-mode average:"
-awk -F',' '
-  NR == 1 {next}
-  {
-    mode=$1
-    write_bw[mode]+=$5
-    read_bw[mode]+=$6
-    write_s[mode]+=$7
-    read_s[mode]+=$8
-    count[mode]+=1
-  }
-  END {
-    printf "%-16s %12s %12s %12s %12s %8s\n", "mode", "write_bw", "read_bw", "write_s", "read_s", "runs"
-    for (mode in count) {
-      printf "%-16s %12.2f %12.2f %12.6f %12.6f %8d\n",
-             mode, write_bw[mode]/count[mode], read_bw[mode]/count[mode],
-             write_s[mode]/count[mode], read_s[mode]/count[mode], count[mode]
+if (( WRITE_ENABLED && READ_ENABLED )); then
+  echo "[ior-backend-cmp] per-mode average:"
+  awk -F',' '
+    NR == 1 {next}
+    {
+      mode=$1
+      write_bw[mode]+=$5
+      read_bw[mode]+=$6
+      write_s[mode]+=$7
+      read_s[mode]+=$8
+      count[mode]+=1
     }
-  }
-' "${SUMMARY_CSV}" | { read -r header; echo "${header}"; sort; }
+    END {
+      printf "%-16s %12s %12s %12s %12s %8s\n", "mode", "write_bw", "read_bw", "write_s", "read_s", "runs"
+      for (mode in count) {
+        printf "%-16s %12.2f %12.2f %12.6f %12.6f %8d\n",
+               mode, write_bw[mode]/count[mode], read_bw[mode]/count[mode],
+               write_s[mode]/count[mode], read_s[mode]/count[mode], count[mode]
+      }
+    }
+  ' "${SUMMARY_CSV}" | { read -r header; echo "${header}"; sort; }
+elif (( READ_ENABLED )); then
+  echo "[ior-backend-cmp] per-mode average (read-only):"
+  awk -F',' '
+    NR == 1 {next}
+    {
+      mode=$1
+      read_bw[mode]+=$6
+      read_s[mode]+=$8
+      count[mode]+=1
+    }
+    END {
+      printf "%-16s %12s %12s %8s\n", "mode", "read_bw", "read_s", "runs"
+      for (mode in count) {
+        printf "%-16s %12.2f %12.6f %8d\n",
+               mode, read_bw[mode]/count[mode], read_s[mode]/count[mode], count[mode]
+      }
+    }
+  ' "${SUMMARY_CSV}" | { read -r header; echo "${header}"; sort; }
+else
+  echo "[ior-backend-cmp] per-mode average (write-only):"
+  awk -F',' '
+    NR == 1 {next}
+    {
+      mode=$1
+      write_bw[mode]+=$5
+      write_s[mode]+=$7
+      count[mode]+=1
+    }
+    END {
+      printf "%-16s %12s %12s %8s\n", "mode", "write_bw", "write_s", "runs"
+      for (mode in count) {
+        printf "%-16s %12.2f %12.6f %8d\n",
+               mode, write_bw[mode]/count[mode], write_s[mode]/count[mode], count[mode]
+      }
+    }
+  ' "${SUMMARY_CSV}" | { read -r header; echo "${header}"; sort; }
+fi
 
 echo
-echo "[ior-backend-cmp] speedup vs MPIIO (bandwidth ratio):"
-awk -F',' '
-  NR == 1 {next}
-  {
-    mode=$1
-    write_bw[mode]+=$5
-    read_bw[mode]+=$6
-    count[mode]+=1
-  }
-  END {
-    if (!count["MPIIO"]) {
-      print "MPIIO baseline missing."
-      exit 0
+if (( WRITE_ENABLED && READ_ENABLED )); then
+  echo "[ior-backend-cmp] speedup vs MPIIO (bandwidth ratio):"
+  awk -F',' '
+    NR == 1 {next}
+    {
+      mode=$1
+      write_bw[mode]+=$5
+      read_bw[mode]+=$6
+      count[mode]+=1
     }
-    mpiio_write=write_bw["MPIIO"]/count["MPIIO"]
-    mpiio_read=read_bw["MPIIO"]/count["MPIIO"]
-    printf "%-16s %14s %14s %12s %12s\n", "mode", "write_speedup", "read_speedup", "write_delta", "read_delta"
-    for (mode in count) {
-      w=(write_bw[mode]/count[mode])/mpiio_write
-      r=(read_bw[mode]/count[mode])/mpiio_read
-      printf "%-16s %14.3fx %14.3fx %11.2f%% %11.2f%%\n",
-             mode, w, r, (w-1.0)*100.0, (r-1.0)*100.0
+    END {
+      if (!count["MPIIO"]) {
+        print "MPIIO baseline missing."
+        exit 0
+      }
+      mpiio_write=write_bw["MPIIO"]/count["MPIIO"]
+      mpiio_read=read_bw["MPIIO"]/count["MPIIO"]
+      printf "%-16s %14s %14s %12s %12s\n", "mode", "write_speedup", "read_speedup", "write_delta", "read_delta"
+      for (mode in count) {
+        w=(write_bw[mode]/count[mode])/mpiio_write
+        r=(read_bw[mode]/count[mode])/mpiio_read
+        printf "%-16s %14.3fx %14.3fx %11.2f%% %11.2f%%\n",
+               mode, w, r, (w-1.0)*100.0, (r-1.0)*100.0
+      }
     }
-  }
-' "${SUMMARY_CSV}" | { read -r header; echo "${header}"; sort; }
+  ' "${SUMMARY_CSV}" | { read -r header; echo "${header}"; sort; }
+elif (( READ_ENABLED )); then
+  echo "[ior-backend-cmp] read speedup vs MPIIO (bandwidth ratio):"
+  awk -F',' '
+    NR == 1 {next}
+    {
+      mode=$1
+      read_bw[mode]+=$6
+      count[mode]+=1
+    }
+    END {
+      if (!count["MPIIO"]) {
+        print "MPIIO baseline missing."
+        exit 0
+      }
+      mpiio_read=read_bw["MPIIO"]/count["MPIIO"]
+      printf "%-16s %14s %12s\n", "mode", "read_speedup", "read_delta"
+      for (mode in count) {
+        r=(read_bw[mode]/count[mode])/mpiio_read
+        printf "%-16s %14.3fx %11.2f%%\n", mode, r, (r-1.0)*100.0
+      }
+    }
+  ' "${SUMMARY_CSV}" | { read -r header; echo "${header}"; sort; }
+else
+  echo "[ior-backend-cmp] write speedup vs MPIIO (bandwidth ratio):"
+  awk -F',' '
+    NR == 1 {next}
+    {
+      mode=$1
+      write_bw[mode]+=$5
+      count[mode]+=1
+    }
+    END {
+      if (!count["MPIIO"]) {
+        print "MPIIO baseline missing."
+        exit 0
+      }
+      mpiio_write=write_bw["MPIIO"]/count["MPIIO"]
+      printf "%-16s %14s %12s\n", "mode", "write_speedup", "write_delta"
+      for (mode in count) {
+        w=(write_bw[mode]/count[mode])/mpiio_write
+        printf "%-16s %14.3fx %11.2f%%\n", mode, w, (w-1.0)*100.0
+      }
+    }
+  ' "${SUMMARY_CSV}" | { read -r header; echo "${header}"; sort; }
+fi
 
 echo
 echo "[ior-backend-cmp] flightplan diagnostics (HEADNODE stress path):"

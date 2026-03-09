@@ -51,6 +51,11 @@ if [[ -f "${LIBOMPTARGET_SO}" && "${LD_PRELOAD:-}" != *"${LIBOMPTARGET_SO}"* ]];
 fi
 
 if [[ "${rank}" -eq "${app_rank}" ]]; then
+  visible_distributed_ranks=$((world_size - 1))
+  expected_visible_ranks="${IOR_MPP_EXPECT_VISIBLE_DEVICES:-0}"
+  if [[ ! "${expected_visible_ranks}" =~ ^[0-9]+$ ]]; then
+    expected_visible_ranks=0
+  fi
   export IOR_MPI_COMM_SELF=1
   host="$(hostname -s)"
   default_args=(
@@ -69,6 +74,18 @@ if [[ "${rank}" -eq "${app_rank}" ]]; then
   fi
 
   echo "[ior-mpp] role=app rank=${rank}/${world_size} host=${host} running IOR with MPI_COMM_SELF"
+  echo "[ior-mpp] visible_distributed_ranks=${visible_distributed_ranks} expected_visible=${expected_visible_ranks} world_rank=${rank} world_size=${world_size} app_rank=${app_rank}"
+  if [[ -n "${OMPFILE_EFFECTIVE_BLOCK_SIZE_BYTES:-}" ]]; then
+    echo "[ior-mpp] effective_block_size_bytes=${OMPFILE_EFFECTIVE_BLOCK_SIZE_BYTES}"
+  fi
+  if (( visible_distributed_ranks < 1 )); then
+    echo "[ior-mpp] error: distributed libompfile requires at least one proxy rank" >&2
+    exit 1
+  fi
+  if (( expected_visible_ranks > 0 && visible_distributed_ranks != expected_visible_ranks )); then
+    echo "[ior-mpp] error: expected ${expected_visible_ranks} distributed ranks visible, found ${visible_distributed_ranks}" >&2
+    exit 1
+  fi
   exec "${IOR_BIN}" "${default_args[@]}"
 fi
 
