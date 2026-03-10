@@ -181,11 +181,21 @@ scale_size_by_factor() {
 prepare_read_input() {
   local data_path="$1"
   local prep_log="$2"
+  local mode="$3"
+  local prep_tasks="${COMPARE_TASKS}"
+  local prep_nodes="${SLURM_JOB_NUM_NODES}"
+  local prep_block_size="${COMPARE_BLOCK_SIZE}"
 
-  echo "[ior-backend-cmp] preparing read input with MPIIO writer -> ${data_path}"
-  srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${COMPARE_TASKS}" \
+  if [[ "${mode}" == "OMPFILE_MPI" && "${OMPFILE_RUN_MPP}" == "1" ]]; then
+    prep_tasks=1
+    prep_nodes=1
+    prep_block_size="$(scale_size_by_factor "${COMPARE_BLOCK_SIZE}" "${COMPARE_TASKS}")"
+  fi
+
+  echo "[ior-backend-cmp] preparing read input with MPIIO writer -> ${data_path} mode=${mode} prep_tasks=${prep_tasks} prep_nodes=${prep_nodes} prep_block=${prep_block_size}"
+  srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${prep_nodes}" --ntasks="${prep_tasks}" \
     "${APPTAINER_BIN}" exec --userns --no-privs --bind /scratch/rodrigo.freitas/io-playground "${SIF_IMAGE}" \
-    bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && unset LIBOMPFILE_BACKEND LIBOMPFILE_SCHEDULER LIBOMPFILE_MPP_OPEN LIBOMPFILE_MPP_IO LIBOMPFILE_MPP_PING LIBOMPFILE_OPT_TWO_PHASE LIBOMPFILE_OPT_OPEN_CACHE LIBOMPFILE_OPT_OPEN_CACHE_KEEP_OPEN LIBOMPFILE_OPT_STATS UCX_TLS UCX_POSIX_USE_PROC_LINK; ${IOR_BIN} -a MPIIO -w -k -t ${COMPARE_TRANSFER_SIZE} -b ${COMPARE_BLOCK_SIZE} -s ${COMPARE_SEGMENTS} -i 1 -F -o ${data_path}" \
+    bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && unset LIBOMPFILE_BACKEND LIBOMPFILE_SCHEDULER LIBOMPFILE_MPP_OPEN LIBOMPFILE_MPP_IO LIBOMPFILE_MPP_PING LIBOMPFILE_OPT_TWO_PHASE LIBOMPFILE_OPT_OPEN_CACHE LIBOMPFILE_OPT_OPEN_CACHE_KEEP_OPEN LIBOMPFILE_OPT_STATS UCX_TLS UCX_POSIX_USE_PROC_LINK; ${IOR_BIN} -a MPIIO -w -k -t ${COMPARE_TRANSFER_SIZE} -b ${prep_block_size} -s ${COMPARE_SEGMENTS} -i 1 -F -o ${data_path}" \
     > "${prep_log}" 2>&1
 }
 
@@ -294,7 +304,7 @@ run_case() {
   fi
 
   if (( READ_ENABLED && ! WRITE_ENABLED )); then
-    prepare_read_input "${data_path}" "${prep_log}"
+    prepare_read_input "${data_path}" "${prep_log}" "${mode}"
   fi
 
   echo "[ior-backend-cmp] mode=${mode} repeat=${repeat_id} mpp=${mpp_enabled_for_case}"
@@ -338,15 +348,19 @@ run_case() {
       local mpp_disabled_sched_count
       local mpp_bootstrap_ok_count
       local visible_rank_match_count
+      local short_read_count
+      local aggregate_warning_count
       mpp_init_fail_count="$(grep -c "MPP scheduler request aborted because MPP init failed" "${log_file}" || true)"
       mpp_open_failed_count="$(grep -c "MPP open failed" "${log_file}" || true)"
       mpp_shim_open_failed_count="$(grep -c "MPP shim open failed" "${log_file}" || true)"
       mpp_disabled_sched_count="$(grep -c "HEADNODE scheduler requested but MPP remote-only mode is disabled" "${log_file}" || true)"
       mpp_bootstrap_ok_count="$(grep -Ec "\\[ior-mpp\\] libomptarget bootstrap completed" "${log_file}" || true)"
       visible_rank_match_count="$(grep -Ec "\\[ior-mpp\\] visible_distributed_ranks=$((COMPARE_TASKS - 1)) expected_visible=$((COMPARE_TASKS - 1))" "${log_file}" || true)"
-      if (( mpp_init_fail_count > 0 || mpp_open_failed_count > 0 || mpp_shim_open_failed_count > 0 || mpp_shim_missing_count > 0 || mpp_disabled_sched_count > 0 || mpp_bootstrap_ok_count == 0 || visible_rank_match_count == 0 )); then
+      short_read_count="$(grep -Ec "short_reads=[1-9][0-9]*" "${log_file}" || true)"
+      aggregate_warning_count="$(grep -c "Expected aggregate file size" "${log_file}" || true)"
+      if (( mpp_init_fail_count > 0 || mpp_open_failed_count > 0 || mpp_shim_open_failed_count > 0 || mpp_shim_missing_count > 0 || mpp_disabled_sched_count > 0 || mpp_bootstrap_ok_count == 0 || visible_rank_match_count == 0 || short_read_count > 0 || aggregate_warning_count > 0 )); then
         echo "Error: OMPFILE+MPP strict mode failed for ${mode} repeat=${repeat_id}." >&2
-        echo "  bootstrap_ok=${mpp_bootstrap_ok_count} visible_match=${visible_rank_match_count} init_fail=${mpp_init_fail_count} open_fail=${mpp_open_failed_count} shim_open_fail=${mpp_shim_open_failed_count} shim_missing=${mpp_shim_missing_count} sched_disabled=${mpp_disabled_sched_count}" >&2
+        echo "  bootstrap_ok=${mpp_bootstrap_ok_count} visible_match=${visible_rank_match_count} init_fail=${mpp_init_fail_count} open_fail=${mpp_open_failed_count} shim_open_fail=${mpp_shim_open_failed_count} shim_missing=${mpp_shim_missing_count} sched_disabled=${mpp_disabled_sched_count} short_reads=${short_read_count} aggregate_warnings=${aggregate_warning_count}" >&2
         exit 1
       fi
     fi
