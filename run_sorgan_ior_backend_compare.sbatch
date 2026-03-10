@@ -115,6 +115,60 @@ export LLVM_INSTALL_ROOT=${LLVM_INSTALL_ROOT} && \
 export PATH=/usr/local/mpich/bin:\${PATH} && \
 export LD_LIBRARY_PATH=/usr/local/mpich/lib:${OMP_RUNTIME_LIB}:${OMPFILE_LIB}:${LLVM_ROOT}/lib:\${LD_LIBRARY_PATH:-}"
 
+scale_size_by_factor() {
+  local size_token_raw="$1"
+  local factor="$2"
+  local size_token="${size_token_raw,,}"
+  local suffix="${size_token: -1}"
+  local number_part="${size_token}"
+  local multiplier=1
+
+  case "${suffix}" in
+    k)
+      multiplier=1024
+      number_part="${size_token%k}"
+      ;;
+    m)
+      multiplier=$((1024 * 1024))
+      number_part="${size_token%m}"
+      ;;
+    g)
+      multiplier=$((1024 * 1024 * 1024))
+      number_part="${size_token%g}"
+      ;;
+  esac
+
+  if [[ ! "${number_part}" =~ ^[0-9]+$ ]]; then
+    echo "Error: unsupported size token '${size_token_raw}'" >&2
+    exit 1
+  fi
+
+  echo $((number_part * multiplier * factor))
+}
+
+size_token_to_bytes() {
+  local size_token_raw="$1"
+  scale_size_by_factor "${size_token_raw}" 1
+}
+
+validate_transfer_block_shape() {
+  local transfer_bytes
+  local block_bytes
+  transfer_bytes="$(size_token_to_bytes "${COMPARE_TRANSFER_SIZE}")"
+  block_bytes="$(size_token_to_bytes "${COMPARE_BLOCK_SIZE}")"
+
+  if (( block_bytes < transfer_bytes )); then
+    echo "Error: IOR_COMPARE_BLOCK_SIZE (${COMPARE_BLOCK_SIZE}) must be >= IOR_COMPARE_TRANSFER_SIZE (${COMPARE_TRANSFER_SIZE})." >&2
+    exit 1
+  fi
+  if (( transfer_bytes == 0 || (block_bytes % transfer_bytes) != 0 )); then
+    echo "Error: IOR_COMPARE_BLOCK_SIZE (${COMPARE_BLOCK_SIZE}) must be a multiple of IOR_COMPARE_TRANSFER_SIZE (${COMPARE_TRANSFER_SIZE})." >&2
+    exit 1
+  fi
+}
+
+validate_transfer_block_shape
+
 if [[ "${BUILD_IOR}" == "1" || ! -x "${IOR_BIN}" ]]; then
   echo "[ior-backend-cmp] building IOR"
   "${APPTAINER_BIN}" exec --userns --no-privs --bind /scratch/rodrigo.freitas/io-playground "${SIF_IMAGE}" \
@@ -145,37 +199,6 @@ extract_summary_field() {
     /^Summary of all tests:/ {in_summary=1; next}
     in_summary && $1 == op {print $col; exit}
   ' "${log_file}"
-}
-
-scale_size_by_factor() {
-  local size_token_raw="$1"
-  local factor="$2"
-  local size_token="${size_token_raw,,}"
-  local suffix="${size_token: -1}"
-  local number_part="${size_token}"
-  local multiplier=1
-
-  case "${suffix}" in
-    k)
-      multiplier=1024
-      number_part="${size_token%k}"
-      ;;
-    m)
-      multiplier=$((1024 * 1024))
-      number_part="${size_token%m}"
-      ;;
-    g)
-      multiplier=$((1024 * 1024 * 1024))
-      number_part="${size_token%g}"
-      ;;
-  esac
-
-  if [[ ! "${number_part}" =~ ^[0-9]+$ ]]; then
-    echo "Error: unsupported size token '${size_token_raw}'" >&2
-    exit 1
-  fi
-
-  echo $((number_part * multiplier * factor))
 }
 
 prepare_read_input() {
