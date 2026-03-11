@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <dlfcn.h>
+#include <limits.h>
 
 #include "file_interface.h"  /* libompfile API */
 
@@ -55,6 +56,24 @@ static int env_enabled(const char *name)
 {
     const char *v = getenv(name);
     return v && v[0] == '1' && v[1] == '\0';
+}
+
+static int env_int_or_default(const char *name, int default_value)
+{
+    const char *value = getenv(name);
+    char *end = NULL;
+    long parsed = 0;
+
+    if (!value || value[0] == '\0')
+        return default_value;
+
+    errno = 0;
+    parsed = strtol(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed < 0 ||
+        parsed > INT_MAX)
+        return default_value;
+
+    return (int)parsed;
 }
 
 /* Bootstrap libomptarget/plugin initialization in pure IOR processes before
@@ -128,18 +147,40 @@ static aiori_fd_t *OMPFILE_Open(char *fname, int flags, aiori_mod_opt_t *opt)
 {
     (void)opt;  /* unused */
 
-    int h = omp_file_open(fname);
-    if (h < 0) {
-        /* create path for write phase */
-        if (flags & IOR_CREAT) {
+    const int mpp_mode = env_enabled("LIBOMPFILE_MPP_OPEN") &&
+                         env_enabled("LIBOMPFILE_MPP_IO");
+    const int open_retry_count =
+        env_int_or_default("IOR_OMPFILE_OPEN_RETRY_COUNT", mpp_mode ? 8 : 2);
+    const int open_retry_delay_ms =
+        env_int_or_default("IOR_OMPFILE_OPEN_RETRY_DELAY_MS", mpp_mode ? 500 : 0);
+    int path_created = 0;
+    int h = -1;
+
+    for (int attempt = 0; attempt < open_retry_count; ++attempt) {
+        h = omp_file_open(fname);
+        if (h >= 0)
+            break;
+
+        if ((flags & IOR_CREAT) && !path_created) {
             int fd = open(fname, O_CREAT | O_RDWR, 0666);
-            if (fd >= 0)
+            if (fd >= 0) {
                 close(fd);
-            h = omp_file_open(fname);
+                path_created = 1;
+                h = omp_file_open(fname);
+                if (h >= 0)
+                    break;
+            }
         }
-        if (h < 0)
-            return NULL; /* IOR will abort */
+
+        if (attempt + 1 < open_retry_count && open_retry_delay_ms > 0) {
+            fprintf(out_logfile,
+                    "[ior-mpp] omp_file_open retry %d/%d for %s after %d ms\n",
+                    attempt + 2, open_retry_count, fname, open_retry_delay_ms);
+            usleep((useconds_t)open_retry_delay_ms * 1000);
+        }
     }
+    if (h < 0)
+        return NULL; /* IOR will abort */
 
     ompfile_fd_t *m = xmalloc(sizeof(*m));
     m->handle = h;

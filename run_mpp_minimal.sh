@@ -53,8 +53,12 @@ fi
 if [[ "${rank}" -eq "${app_rank}" ]]; then
   visible_distributed_ranks=$((world_size - 1))
   expected_visible_ranks="${IOR_MPP_EXPECT_VISIBLE_DEVICES:-0}"
+  app_delay_sec="${IOR_MPP_APP_DELAY_SEC:-3}"
   if [[ ! "${expected_visible_ranks}" =~ ^[0-9]+$ ]]; then
     expected_visible_ranks=0
+  fi
+  if [[ ! "${app_delay_sec}" =~ ^[0-9]+$ ]]; then
+    app_delay_sec=3
   fi
   export IOR_MPI_COMM_SELF=1
   host="$(hostname -s)"
@@ -85,6 +89,10 @@ if [[ "${rank}" -eq "${app_rank}" ]]; then
   if (( expected_visible_ranks > 0 && visible_distributed_ranks != expected_visible_ranks )); then
     echo "[ior-mpp] error: expected ${expected_visible_ranks} distributed ranks visible, found ${visible_distributed_ranks}" >&2
     exit 1
+  fi
+  if (( app_delay_sec > 0 )); then
+    echo "[ior-mpp] delaying app start by ${app_delay_sec}s to let proxy ranks initialize"
+    sleep "${app_delay_sec}"
   fi
   exec "${IOR_BIN}" "${default_args[@]}"
 fi
