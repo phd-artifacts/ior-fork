@@ -2,7 +2,7 @@
 
 set -e
 
-REPO_ROOT="/scratch/rodrigo.freitas/io-playground"
+REPO_ROOT="${REPO_ROOT:-${PROJECT_ROOT:-/scratch/rodrigo.freitas/io-stage/src}}"
 LLVM_BUILD_ROOT="${LLVM_BUILD_ROOT:-${LLVM_ROOT:-${REPO_ROOT}/llvm-infra/llvm-builds/apptainer-Debug}}"
 LLVM_INSTALL_ROOT="${LLVM_INSTALL_ROOT:-${LLVM_INSTALL_DIR:-${REPO_ROOT}/llvm-infra/llvm-installs/apptainer-Debug}}"
 OMPFILE_INC="${OMPFILE_INC:-${LLVM_INSTALL_ROOT}/include}"

@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="/scratch/rodrigo.freitas/io-playground"
+REPO_ROOT="${PROJECT_ROOT:-/scratch/rodrigo.freitas/io-stage/src}"
 SIF_IMAGE="${REPO_ROOT}/sifs/ompc-base_latest.sif"
 LLVM_ROOT="${LLVM_ROOT:-${REPO_ROOT}/llvm-infra/llvm-builds/apptainer-Debug}"
 LLVM_INSTALL_ROOT="${LLVM_INSTALL_ROOT:-${REPO_ROOT}/llvm-infra/llvm-installs/apptainer-Debug}"
@@ -44,7 +44,7 @@ export LD_LIBRARY_PATH=/usr/local/mpich/lib:${OMP_RUNTIME_LIB}:${OMPFILE_LIB}:${
 
 if [[ "${BUILD_IOR}" == "1" || ! -x "${IOR_BIN}" ]]; then
   echo "[ior-mpp] building IOR backend binary"
-  apptainer exec --userns --no-privs --bind /scratch/rodrigo.freitas/io-playground "${SIF_IMAGE}" \
+  apptainer exec --userns --no-privs --bind "${REPO_ROOT}" "${SIF_IMAGE}" \
     bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && bash ${REPO_ROOT}/sh-scripts/register_mpi_clang.sh && CFLAGS='-std=c99' CPPFLAGS='-I${OMPFILE_INC}' LDFLAGS='-L${OMPFILE_LIB}' ./configure CC=mpi_clang && make -j"
 fi
 
@@ -56,7 +56,7 @@ fi
 echo "[ior-mpp] launching MPP prototype with ${SRUN_TASKS} tasks"
 
 srun --mpi=pmi2 --nodes="${SRUN_NODES}" --ntasks="${SRUN_TASKS}" \
-  apptainer exec --userns --no-privs --bind /scratch/rodrigo.freitas/io-playground "${SIF_IMAGE}" \
+  apptainer exec --userns --no-privs --bind "${REPO_ROOT}" "${SIF_IMAGE}" \
   bash -lc "${COMMON_ENV} && \
     export IOR_BIN=${IOR_BIN} && \
     export OMPFILE_IOR_ARGS='-a OMPFILE -w -r -t 256k -b 4m -s 4 -i 1 -F -o ${IOR_DIR}/tmp/ior-mpp-minimal.dat' && \

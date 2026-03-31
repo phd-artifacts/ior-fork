@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="${REPO_ROOT:-/scratch/rodrigo.freitas/io-playground}"
+REPO_ROOT="${REPO_ROOT:-${PROJECT_ROOT:-/scratch/rodrigo.freitas/io-stage/src}}"
 SIF_IMAGE="${SIF_IMAGE:-${REPO_ROOT}/sifs/ompc-base_latest.sif}"
 APPTAINER_BIN="${APPTAINER_BIN:-/usr/bin/apptainer}"
 LLVM_ROOT="${LLVM_ROOT:-${REPO_ROOT}/llvm-infra/llvm-builds/apptainer-Debug}"
@@ -171,7 +171,7 @@ validate_transfer_block_shape
 
 if [[ "${BUILD_IOR}" == "1" || ! -x "${IOR_BIN}" ]]; then
   echo "[ior-backend-cmp] building IOR"
-  "${APPTAINER_BIN}" exec --userns --no-privs --bind /scratch/rodrigo.freitas/io-playground "${SIF_IMAGE}" \
+  "${APPTAINER_BIN}" exec --userns --no-privs --bind "${REPO_ROOT}" "${SIF_IMAGE}" \
     bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && source ${REPO_ROOT}/sh-scripts/register_mpi_clang.sh && CPPFLAGS='-I${OMPFILE_INC}' LDFLAGS='-L${OMPFILE_LIB}' ./configure CC=mpi_clang && make -j"
 fi
 
@@ -217,7 +217,7 @@ prepare_read_input() {
 
   echo "[ior-backend-cmp] preparing read input with MPIIO writer -> ${data_path} mode=${mode} prep_tasks=${prep_tasks} prep_nodes=${prep_nodes} prep_block=${prep_block_size}"
   srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${prep_nodes}" --ntasks="${prep_tasks}" \
-    "${APPTAINER_BIN}" exec --userns --no-privs --bind /scratch/rodrigo.freitas/io-playground "${SIF_IMAGE}" \
+    "${APPTAINER_BIN}" exec --userns --no-privs --bind "${REPO_ROOT}" "${SIF_IMAGE}" \
     bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && unset LIBOMPFILE_BACKEND LIBOMPFILE_SCHEDULER LIBOMPFILE_MPP_OPEN LIBOMPFILE_MPP_IO LIBOMPFILE_MPP_PING LIBOMPFILE_OPT_TWO_PHASE LIBOMPFILE_OPT_OPEN_CACHE LIBOMPFILE_OPT_OPEN_CACHE_KEEP_OPEN LIBOMPFILE_OPT_STATS UCX_TLS UCX_POSIX_USE_PROC_LINK; ${IOR_BIN} -a MPIIO -w -k -t ${COMPARE_TRANSFER_SIZE} -b ${prep_block_size} -s ${COMPARE_SEGMENTS} -i 1 -F -o ${data_path}" \
     > "${prep_log}" 2>&1
 }
@@ -229,7 +229,7 @@ run_standard_case() {
   local log_file="$4"
 
   srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${COMPARE_TASKS}" \
-    "${APPTAINER_BIN}" exec --userns --no-privs --bind /scratch/rodrigo.freitas/io-playground "${SIF_IMAGE}" \
+    "${APPTAINER_BIN}" exec --userns --no-privs --bind "${REPO_ROOT}" "${SIF_IMAGE}" \
     bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && ${mode_env_stmt} ${IOR_BIN} -a ${api} ${IO_FLAGS} -t ${COMPARE_TRANSFER_SIZE} -b ${COMPARE_BLOCK_SIZE} -s ${COMPARE_SEGMENTS} -i ${COMPARE_ITERATIONS} -F -o ${data_path}" \
     > "${log_file}" 2>&1
 }
@@ -248,7 +248,7 @@ run_ompfile_mpp_case() {
   ompfile_block_size_bytes="$(scale_size_by_factor "${COMPARE_BLOCK_SIZE}" "${COMPARE_TASKS}")"
 
   srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${COMPARE_TASKS}" \
-    "${APPTAINER_BIN}" exec --userns --no-privs --bind /scratch/rodrigo.freitas/io-playground "${SIF_IMAGE}" \
+    "${APPTAINER_BIN}" exec --userns --no-privs --bind "${REPO_ROOT}" "${SIF_IMAGE}" \
     bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && \
       export IOR_BIN=${IOR_BIN} && \
       export PROXY_BIN=${PROXY_BIN} && \

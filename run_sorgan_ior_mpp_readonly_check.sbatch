@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="/scratch/rodrigo.freitas/io-playground"
+REPO_ROOT="${PROJECT_ROOT:-/scratch/rodrigo.freitas/io-stage/src}"
 SIF_IMAGE="${REPO_ROOT}/sifs/ompc-base_latest.sif"
 LLVM_ROOT="${LLVM_ROOT:-${REPO_ROOT}/llvm-infra/llvm-builds/apptainer-Debug}"
 LLVM_INSTALL_ROOT="${LLVM_INSTALL_ROOT:-${REPO_ROOT}/llvm-infra/llvm-installs/apptainer-Debug}"
@@ -51,7 +51,7 @@ export PATH=/usr/local/mpich/bin:${PATH} && \
 export LD_LIBRARY_PATH=/usr/local/mpich/lib:${OMP_RUNTIME_LIB}:${OMPFILE_LIB}:${LLVM_ROOT}/lib:${LD_LIBRARY_PATH:-}"
 
 srun --mpi=pmi2 --nodes=2 --ntasks=4 --ntasks-per-node=2 \
-  apptainer exec --userns --no-privs --bind /scratch/rodrigo.freitas/io-playground "${SIF_IMAGE}" \
+  apptainer exec --userns --no-privs --bind "${REPO_ROOT}" "${SIF_IMAGE}" \
   bash -lc "${COMMON_ENV} && \
     export IOR_BIN=${IOR_BIN} && \
     export OMPFILE_IOR_ARGS='-a OMPFILE -r -t 256k -b 4m -s 4 -i 1 -F -o ${DATA_BASENAME}' && \

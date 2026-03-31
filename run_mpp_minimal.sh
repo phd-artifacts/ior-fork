@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="${REPO_ROOT:-/scratch/rodrigo.freitas/io-playground}"
-LLVM_ROOT="${LLVM_ROOT:-/scratch/rodrigo.freitas/io-playground/llvm-infra/llvm-builds/apptainer-Debug}"
+REPO_ROOT="${REPO_ROOT:-${PROJECT_ROOT:-/scratch/rodrigo.freitas/io-stage/src}}"
+LLVM_ROOT="${LLVM_ROOT:-${LLVM_BUILD_ROOT:-${REPO_ROOT}/llvm-infra/llvm-builds/apptainer-Debug}}"
 IOR_BIN="${IOR_BIN:-${REPO_ROOT}/application/ior-fork/src/ior}"
 PROXY_BIN="${PROXY_BIN:-${LLVM_ROOT}/bin/llvm-offload-mpi-proxy-device}"
 IOR_OUTFILE="${IOR_OUTFILE:-${REPO_ROOT}/application/ior-fork/tmp/ior-mpp-prototype.dat}"
