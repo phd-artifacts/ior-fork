@@ -12,7 +12,19 @@
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-${PROJECT_ROOT:-/scratch/rodrigo.freitas/io-stage/src}}"
-SIF_IMAGE="${SIF_IMAGE:-${REPO_ROOT}/sifs/ompc-base_latest.sif}"
+if [[ -n "${SIF_IMAGE:-}" && -e "${SIF_IMAGE}" ]]; then
+  SIF_IMAGE="${SIF_IMAGE}"
+elif [[ -e "${REPO_ROOT}/ompc-base_latest.sif" ]]; then
+  SIF_IMAGE="${REPO_ROOT}/ompc-base_latest.sif"
+elif [[ -e "${REPO_ROOT}/sifs/ompc-base_latest.sif" ]]; then
+  SIF_IMAGE="${REPO_ROOT}/sifs/ompc-base_latest.sif"
+elif [[ -n "${SIF_IMAGE:-}" ]]; then
+  echo "Error: Apptainer image not found: ${SIF_IMAGE}" >&2
+  exit 1
+else
+  echo "Error: Apptainer image not found in ${REPO_ROOT}/ompc-base_latest.sif or ${REPO_ROOT}/sifs/ompc-base_latest.sif" >&2
+  exit 1
+fi
 APPTAINER_BIN="${APPTAINER_BIN:-/usr/bin/apptainer}"
 LLVM_ROOT="${LLVM_ROOT:-${REPO_ROOT}/llvm-infra/llvm-builds/apptainer-Debug}"
 LLVM_INSTALL_ROOT="${LLVM_INSTALL_ROOT:-${REPO_ROOT}/llvm-infra/llvm-installs/apptainer-Debug}"
@@ -62,7 +74,7 @@ if [[ ! "${OMPFILE_REQUIRE_MPP}" =~ ^[01]$ ]]; then
   exit 1
 fi
 
-if [[ ! -f "${SIF_IMAGE}" ]]; then
+if [[ ! -e "${SIF_IMAGE}" ]]; then
   echo "Error: Apptainer image not found: ${SIF_IMAGE}" >&2
   exit 1
 fi
@@ -172,7 +184,7 @@ validate_transfer_block_shape
 if [[ "${BUILD_IOR}" == "1" || ! -x "${IOR_BIN}" ]]; then
   echo "[ior-backend-cmp] building IOR"
   "${APPTAINER_BIN}" exec --userns --no-privs --bind "${REPO_ROOT}" "${SIF_IMAGE}" \
-    bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && source ${REPO_ROOT}/sh-scripts/register_mpi_clang.sh && CPPFLAGS='-I${OMPFILE_INC}' LDFLAGS='-L${OMPFILE_LIB}' ./configure CC=mpi_clang && make -j"
+    bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && CPPFLAGS='-I${OMPFILE_INC}' LDFLAGS='-L${OMPFILE_LIB}' ./bootstrap && ./configure CC='mpicc -std=gnu11 -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L' && make -j"
 fi
 
 if [[ ! -x "${IOR_BIN}" ]]; then
