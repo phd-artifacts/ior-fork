@@ -75,6 +75,19 @@ Distributed compare on Slurm (2 nodes by default):
 sbatch /scratch/rodrigo.freitas/io-playground/application/ior-fork/run_sorgan_ior_backend_compare.sbatch
 ```
 
+An AMD (hpcfund) variant is available as `run_amd_ior_backend_compare.sbatch`
+(role-script container re-entry, `srun --mpi=pmix`, host spack MPICH
+override, same summary-CSV contract; `rw`/`write` only — no read-prep pass).
+Both wrappers build IOR in-container with `unset CPATH` (the repo clang's
+resource headers on CPATH break the system compiler's stdint include chain)
+and pass `CPPFLAGS`/`LDFLAGS` as `./configure` arguments so the libompfile
+include/lib survive to `make`. The OMPFILE strict-MPP gate tolerates
+planned-open fallbacks when a remote-only open completed, and treats IOR's
+"Expected aggregate file size" warning as fatal only when the actual bytes
+moved differ (an app-side NFS stat can lag split-role writes from other
+nodes). Proxy lifetime is `IOR_PROXY_EXIT_TIMEOUT_SEC` (sorgan default 20,
+AMD 60) — it must exceed the app's total I/O time per case.
+
 Inspect output:
 
 ```bash

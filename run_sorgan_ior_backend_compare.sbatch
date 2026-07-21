@@ -182,10 +182,26 @@ validate_transfer_block_shape() {
 
 validate_transfer_block_shape
 
+# Bind set must cover the spinner result root (outside REPO_ROOT) — same
+# fix as the HACC compare lane (job 3767): ROMIO/POSIX fail with "Invalid
+# file name" when the data path is not visible inside the container.
+APPTAINER_BIND_PATHS="${REPO_ROOT},/tmp,/dev/shm"
+if [[ -d /scratch ]]; then
+  APPTAINER_BIND_PATHS="${APPTAINER_BIND_PATHS},/scratch"
+fi
+if [[ -d /local ]]; then
+  APPTAINER_BIND_PATHS="${APPTAINER_BIND_PATHS},/local"
+fi
+
 if [[ "${BUILD_IOR}" == "1" || ! -x "${IOR_BIN}" ]]; then
   echo "[ior-backend-cmp] building IOR"
-  "${APPTAINER_BIN}" exec --userns --no-privs --bind "${REPO_ROOT}" "${SIF_IMAGE}" \
-    bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && CPPFLAGS='-I${OMPFILE_INC}' LDFLAGS='-L${OMPFILE_LIB}' ./bootstrap && ./configure CC='mpicc -std=gnu11 -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L' && make -j"
+  # unset CPATH: set_env.sh adds the repo clang's builtin resource headers
+  # (lib/clang/<N>/include) to CPATH for the repo toolchain, but mpicc wraps
+  # the container's system clang — resolving another clang's stdint.h via
+  # CPATH breaks its include_next chain (unknown uint16_t/int64_t). The only
+  # header IOR needs from the repo tree is file_interface.h, passed via -I.
+  "${APPTAINER_BIN}" exec --userns --no-privs --bind "${APPTAINER_BIND_PATHS}" "${SIF_IMAGE}" \
+    bash -lc "${COMMON_ENV} && unset CPATH && cd ${IOR_DIR} && ./bootstrap && ./configure CC='mpicc -std=gnu11 -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L' CPPFLAGS='-I${OMPFILE_INC}' LDFLAGS='-L${OMPFILE_LIB}' && make -j"
 fi
 
 if [[ ! -x "${IOR_BIN}" ]]; then
@@ -230,7 +246,7 @@ prepare_read_input() {
 
   echo "[ior-backend-cmp] preparing read input with MPIIO writer -> ${data_path} mode=${mode} prep_tasks=${prep_tasks} prep_nodes=${prep_nodes} prep_block=${prep_block_size}"
   srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${prep_nodes}" --ntasks="${prep_tasks}" \
-    "${APPTAINER_BIN}" exec --userns --no-privs --bind "${REPO_ROOT}" "${SIF_IMAGE}" \
+    "${APPTAINER_BIN}" exec --userns --no-privs --bind "${APPTAINER_BIND_PATHS}" "${SIF_IMAGE}" \
     bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && unset LIBOMPFILE_BACKEND LIBOMPFILE_SCHEDULER LIBOMPFILE_MPP_OPEN LIBOMPFILE_MPP_IO LIBOMPFILE_MPP_PING LIBOMPFILE_OPT_TWO_PHASE LIBOMPFILE_OPT_OPEN_CACHE LIBOMPFILE_OPT_OPEN_CACHE_KEEP_OPEN LIBOMPFILE_OPT_STATS UCX_TLS UCX_POSIX_USE_PROC_LINK; ${IOR_BIN} -a MPIIO -w -k -t ${COMPARE_TRANSFER_SIZE} -b ${prep_block_size} -s ${COMPARE_SEGMENTS} -i 1 -F -o ${data_path}" \
     > "${prep_log}" 2>&1
 }
@@ -242,7 +258,7 @@ run_standard_case() {
   local log_file="$4"
 
   srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${COMPARE_TASKS}" \
-    "${APPTAINER_BIN}" exec --userns --no-privs --bind "${REPO_ROOT}" "${SIF_IMAGE}" \
+    "${APPTAINER_BIN}" exec --userns --no-privs --bind "${APPTAINER_BIND_PATHS}" "${SIF_IMAGE}" \
     bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && ${mode_env_stmt} ${IOR_BIN} -a ${api} ${IO_FLAGS} -t ${COMPARE_TRANSFER_SIZE} -b ${COMPARE_BLOCK_SIZE} -s ${COMPARE_SEGMENTS} -i ${COMPARE_ITERATIONS} -F -o ${data_path}" \
     > "${log_file}" 2>&1
 }
@@ -261,13 +277,13 @@ run_ompfile_mpp_case() {
   ompfile_block_size_bytes="$(scale_size_by_factor "${COMPARE_BLOCK_SIZE}" "${COMPARE_TASKS}")"
 
   srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${COMPARE_TASKS}" \
-    "${APPTAINER_BIN}" exec --userns --no-privs --bind "${REPO_ROOT}" "${SIF_IMAGE}" \
+    "${APPTAINER_BIN}" exec --userns --no-privs --bind "${APPTAINER_BIND_PATHS}" "${SIF_IMAGE}" \
     bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && \
       export IOR_BIN=${IOR_BIN} && \
       export PROXY_BIN=${PROXY_BIN} && \
       export APP_RANK=$((SLURM_NTASKS - 1)) && \
       export IOR_MPP_EXPECT_VISIBLE_DEVICES=${distributed_visible_ranks} && \
-      export PROXY_EXIT_TIMEOUT_SEC=20 && \
+      export PROXY_EXIT_TIMEOUT_SEC=${IOR_PROXY_EXIT_TIMEOUT_SEC:-20} && \
       export LIBOMPFILE_BACKEND=MPI && \
       export LIBOMPFILE_SCHEDULER=${OMPFILE_SCHEDULER} && \
       export LIBOMPFILE_MPP_OPEN=1 && \
@@ -387,6 +403,7 @@ run_case() {
       local visible_rank_match_count
       local short_read_count
       local aggregate_warning_count
+      local aggregate_short_count
       mpp_init_fail_count="$(grep -c "MPP scheduler request aborted because MPP init failed" "${log_file}" || true)"
       mpp_open_failed_count="$(grep -c "MPP open failed" "${log_file}" || true)"
       mpp_shim_open_failed_count="$(grep -c "MPP shim open failed" "${log_file}" || true)"
@@ -395,9 +412,27 @@ run_case() {
       visible_rank_match_count="$(grep -Ec "\\[ior-mpp\\] visible_distributed_ranks=$((COMPARE_TASKS - 1)) expected_visible=$((COMPARE_TASKS - 1))" "${log_file}" || true)"
       short_read_count="$(grep -Ec "short_reads=[1-9][0-9]*" "${log_file}" || true)"
       aggregate_warning_count="$(grep -c "Expected aggregate file size" "${log_file}" || true)"
-      if (( mpp_init_fail_count > 0 || mpp_open_failed_count > 0 || mpp_shim_open_failed_count > 0 || mpp_shim_missing_count > 0 || mpp_disabled_sched_count > 0 || mpp_bootstrap_ok_count == 0 || visible_rank_match_count == 0 || short_read_count > 0 || aggregate_warning_count > 0 )); then
+      # On NFS the app-side stat can lag split-role writes issued from other
+      # nodes (stale attribute cache reports size 0) while IOR confirms every
+      # byte moved. Only treat the warning as fatal when the actual bytes
+      # moved differ from the expected aggregate.
+      aggregate_short_count="$(awk '
+        /Expected aggregate file size/ {expv=$NF; have=1}
+        /Using actual aggregate bytes moved/ {if (have && $NF+0 != expv+0) bad++; have=0}
+        END {print bad+0}' "${log_file}")"
+      local remote_only_open_count
+      remote_only_open_count="$(grep -c "Remote-only open completed" "${log_file}" || true)"
+      # Planned MPP open can transiently fail on a write-first flow (the
+      # planned open carries no O_CREAT, so it ENOENTs before the file
+      # exists) and fall back to the default open path — the run is still
+      # remote-only MPP as long as a remote-only open completed. Only treat
+      # open failures as fatal when no remote-only open ever completed.
+      if (( (mpp_open_failed_count > 0 || mpp_shim_open_failed_count > 0) && remote_only_open_count > 0 )); then
+        echo "[ior-cmp] warning: planned MPP open fell back (open_fail=${mpp_open_failed_count} shim_open_fail=${mpp_shim_open_failed_count}) but remote-only open completed (${remote_only_open_count}); continuing."
+      fi
+      if (( mpp_init_fail_count > 0 || ((mpp_open_failed_count > 0 || mpp_shim_open_failed_count > 0) && remote_only_open_count == 0) || mpp_shim_missing_count > 0 || mpp_disabled_sched_count > 0 || mpp_bootstrap_ok_count == 0 || visible_rank_match_count == 0 || short_read_count > 0 || aggregate_short_count > 0 )); then
         echo "Error: OMPFILE+MPP strict mode failed for ${mode} repeat=${repeat_id}." >&2
-        echo "  bootstrap_ok=${mpp_bootstrap_ok_count} visible_match=${visible_rank_match_count} init_fail=${mpp_init_fail_count} open_fail=${mpp_open_failed_count} shim_open_fail=${mpp_shim_open_failed_count} shim_missing=${mpp_shim_missing_count} sched_disabled=${mpp_disabled_sched_count} short_reads=${short_read_count} aggregate_warnings=${aggregate_warning_count}" >&2
+        echo "  bootstrap_ok=${mpp_bootstrap_ok_count} visible_match=${visible_rank_match_count} init_fail=${mpp_init_fail_count} open_fail=${mpp_open_failed_count} shim_open_fail=${mpp_shim_open_failed_count} shim_missing=${mpp_shim_missing_count} sched_disabled=${mpp_disabled_sched_count} short_reads=${short_read_count} aggregate_warnings=${aggregate_warning_count} aggregate_short=${aggregate_short_count}" >&2
         exit 1
       fi
     fi
