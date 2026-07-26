@@ -130,6 +130,16 @@ case "${COMPARE_RW}" in
     ;;
 esac
 
+# IOR_DATA_CHECK=1 enables IOR's data verification passes (-W re-reads and
+# checks after the write phase, -R checks read data against the written
+# pattern). IOR reports the check phases separately, so write/read bandwidth
+# numbers stay comparable with non-checked runs.
+IOR_DATA_CHECK="${IOR_DATA_CHECK:-0}"
+if [[ "${IOR_DATA_CHECK}" == "1" ]]; then
+  (( WRITE_ENABLED )) && IO_FLAGS="${IO_FLAGS} -W"
+  (( READ_ENABLED )) && IO_FLAGS="${IO_FLAGS} -R"
+fi
+
 # Host spack MPICH (pmi=pmix, cluster-matched) — required for every rank so
 # the PMIx client inside the container can bootstrap (see OOC lane notes).
 SPACK_ROOT="${SPACK_ROOT:-${HOME}/spack}"
@@ -383,6 +393,12 @@ run_case() {
       tail -n 60 "${log_file}" >&2
       exit 1
     }
+  fi
+
+  if [[ "${IOR_DATA_CHECK}" == "1" ]] && grep -qiE "incorrect data|data check error" "${log_file}"; then
+    echo "Error: IOR data check reported errors for mode ${mode} repeat=${repeat_id}" >&2
+    grep -iE "incorrect data|data check error" "${log_file}" | head >&2
+    exit 1
   fi
 
   local write_bw=""
