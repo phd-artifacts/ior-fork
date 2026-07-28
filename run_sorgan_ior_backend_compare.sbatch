@@ -128,6 +128,19 @@ if [[ "${IOR_DATA_CHECK}" == "1" ]]; then
   (( READ_ENABLED )) && IO_FLAGS="${IO_FLAGS} -R"
 fi
 
+# Layout posture: IOR_SHARED=1 drops -F (one shared file, ranks interleaved by
+# segment layout); IOR_REORDER=1 adds -C (reorderTasks: each rank reads the
+# block another rank wrote — the standard client-cache-defeating posture).
+IOR_SHARED="${IOR_SHARED:-0}"
+IOR_REORDER="${IOR_REORDER:-0}"
+LAYOUT_FLAGS="-F"
+if [[ "${IOR_SHARED}" == "1" ]]; then
+  LAYOUT_FLAGS=""
+fi
+if [[ "${IOR_REORDER}" == "1" ]]; then
+  LAYOUT_FLAGS="${LAYOUT_FLAGS} -C"
+fi
+
 MODE_LIST_COMPACT="${COMPARE_MODES_RAW//[[:space:]]/}"
 MODE_LIST_CSV=",${MODE_LIST_COMPACT^^},"
 
@@ -269,7 +282,7 @@ run_standard_case() {
 
   srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${COMPARE_TASKS}" \
     "${APPTAINER_BIN}" exec --userns --no-privs --bind "${APPTAINER_BIND_PATHS}" "${SIF_IMAGE}" \
-    bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && ${mode_env_stmt} ${IOR_BIN} -a ${api} ${IO_FLAGS} -t ${COMPARE_TRANSFER_SIZE} -b ${COMPARE_BLOCK_SIZE} -s ${COMPARE_SEGMENTS} -i ${COMPARE_ITERATIONS} -F -o ${data_path}" \
+    bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && ${mode_env_stmt} ${IOR_BIN} -a ${api} ${IO_FLAGS} -t ${COMPARE_TRANSFER_SIZE} -b ${COMPARE_BLOCK_SIZE} -s ${COMPARE_SEGMENTS} -i ${COMPARE_ITERATIONS} ${LAYOUT_FLAGS} -o ${data_path}" \
     > "${log_file}" 2>&1
 }
 
