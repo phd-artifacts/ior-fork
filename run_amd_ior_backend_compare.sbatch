@@ -237,6 +237,9 @@ mode,repeat,api,libompfile_backend,write_bw_mib_s,read_bw_mib_s,write_mean_s,rea
 EOF
 
 echo "[amd-ior-cmp] allocated nodes: ${SLURM_JOB_NODELIST}"
+# srun rejects --nodes greater than --ntasks: clamp so a lane can run fewer
+# ranks than the allocation has nodes (e.g. 9 writers on a 10-node job).
+SRUN_NODES=$(( COMPARE_TASKS < SLURM_JOB_NUM_NODES ? COMPARE_TASKS : SLURM_JOB_NUM_NODES ))
 echo "[amd-ior-cmp] workload: tasks=${COMPARE_TASKS} block=${COMPARE_BLOCK_SIZE} xfer=${COMPARE_TRANSFER_SIZE} segments=${COMPARE_SEGMENTS} iter=${COMPARE_ITERATIONS} rw=${COMPARE_RW}"
 echo "[amd-ior-cmp] runtime policy: scheduler=${OMPFILE_SCHEDULER} run_mpp=${OMPFILE_RUN_MPP} require_mpp=${OMPFILE_REQUIRE_MPP} fsync_policy=${OMPFILE_WRITETHROUGH_FSYNC_POLICY}"
 
@@ -296,7 +299,7 @@ EOF
   write_role_script "${role_path}" \
     "${mode_env_stmt}" \
     "run_in_container \"${COMPARE_OUTDIR}/exec-${tag}.sh\""
-  srun --kill-on-bad-exit=1 --mpi="${RUN_MPI_TYPE}" --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${COMPARE_TASKS}" --ntasks-per-node=1 \
+  srun --kill-on-bad-exit=1 --mpi="${RUN_MPI_TYPE}" --nodes="${SRUN_NODES}" --ntasks="${COMPARE_TASKS}" --ntasks-per-node=1 \
     "${role_path}" > "${log_file}" 2>&1
 }
 
@@ -347,7 +350,7 @@ else
   echo \"[amd-ior-cmp][rank-map] rank=\${SLURM_PROCID} role=proxy host=\$(hostname -s)\"
 fi
 run_in_container \"${COMPARE_OUTDIR}/exec-${tag}.sh\""
-  srun --kill-on-bad-exit=1 --mpi="${RUN_MPI_TYPE}" --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${COMPARE_TASKS}" --ntasks-per-node=1 \
+  srun --kill-on-bad-exit=1 --mpi="${RUN_MPI_TYPE}" --nodes="${SRUN_NODES}" --ntasks="${COMPARE_TASKS}" --ntasks-per-node=1 \
     "${role_path}" > "${log_file}" 2>&1
 }
 
