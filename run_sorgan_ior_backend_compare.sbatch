@@ -233,6 +233,19 @@ if [[ ! -x "${IOR_BIN}" ]]; then
 fi
 
 mkdir -p "${COMPARE_OUTDIR}"
+# Optional binds (/scratch, /local) exist on some nodes only — see the HACC
+# compare lane: a driver-side [[ -d ]] bakes the driver's mounts into every
+# rank's bind list and FATALs on nodes without them (sorgan-cpu6, job 4186).
+APPTAINER_NODE_EXEC="${COMPARE_OUTDIR}/apptainer-node-exec.sh"
+cat > "${APPTAINER_NODE_EXEC}" <<NODE_EXEC
+#!/usr/bin/env bash
+set -euo pipefail
+binds="${REPO_ROOT},/tmp,/dev/shm"
+[[ -d /scratch ]] && binds="\${binds},/scratch"
+[[ -d /local ]] && binds="\${binds},/local"
+exec "${APPTAINER_BIN}" exec --userns --no-privs --bind "\${binds}" "${SIF_IMAGE}" "\$@"
+NODE_EXEC
+chmod +x "${APPTAINER_NODE_EXEC}"
 SUMMARY_CSV="${COMPARE_OUTDIR}/summary.csv"
 cat > "${SUMMARY_CSV}" <<'EOF'
 mode,repeat,api,libompfile_backend,write_bw_mib_s,read_bw_mib_s,write_mean_s,read_mean_s,log_file,flightplan_state,sched_fallback_count,mpp_shim_missing_count
@@ -269,7 +282,7 @@ prepare_read_input() {
 
   echo "[ior-backend-cmp] preparing read input with MPIIO writer -> ${data_path} mode=${mode} prep_tasks=${prep_tasks} prep_nodes=${prep_nodes} prep_block=${prep_block_size}"
   srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${prep_nodes}" --ntasks="${prep_tasks}" \
-    "${APPTAINER_BIN}" exec --userns --no-privs --bind "${APPTAINER_BIND_PATHS}" "${SIF_IMAGE}" \
+    "${APPTAINER_NODE_EXEC}" \
     bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && unset LIBOMPFILE_BACKEND LIBOMPFILE_SCHEDULER LIBOMPFILE_MPP_OPEN LIBOMPFILE_MPP_IO LIBOMPFILE_MPP_PING LIBOMPFILE_OPT_TWO_PHASE LIBOMPFILE_OPT_OPEN_CACHE LIBOMPFILE_OPT_OPEN_CACHE_KEEP_OPEN LIBOMPFILE_OPT_STATS UCX_TLS UCX_POSIX_USE_PROC_LINK; ${IOR_BIN} -a MPIIO -w -k -t ${COMPARE_TRANSFER_SIZE} -b ${prep_block_size} -s ${COMPARE_SEGMENTS} -i 1 -F -o ${data_path}" \
     > "${prep_log}" 2>&1
 }
@@ -281,7 +294,7 @@ run_standard_case() {
   local log_file="$4"
 
   srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${COMPARE_TASKS}" \
-    "${APPTAINER_BIN}" exec --userns --no-privs --bind "${APPTAINER_BIND_PATHS}" "${SIF_IMAGE}" \
+    "${APPTAINER_NODE_EXEC}" \
     bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && ${mode_env_stmt} ${IOR_BIN} -a ${api} ${IO_FLAGS} -t ${COMPARE_TRANSFER_SIZE} -b ${COMPARE_BLOCK_SIZE} -s ${COMPARE_SEGMENTS} -i ${COMPARE_ITERATIONS} ${LAYOUT_FLAGS} -o ${data_path}" \
     > "${log_file}" 2>&1
 }
@@ -300,7 +313,7 @@ run_ompfile_mpp_case() {
   ompfile_block_size_bytes="$(scale_size_by_factor "${COMPARE_BLOCK_SIZE}" "${COMPARE_TASKS}")"
 
   srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${COMPARE_TASKS}" \
-    "${APPTAINER_BIN}" exec --userns --no-privs --bind "${APPTAINER_BIND_PATHS}" "${SIF_IMAGE}" \
+    "${APPTAINER_NODE_EXEC}" \
     bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && \
       export IOR_BIN=${IOR_BIN} && \
       export PROXY_BIN=${PROXY_BIN} && \
