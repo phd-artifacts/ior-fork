@@ -29,7 +29,7 @@ APPTAINER_BIN="${APPTAINER_BIN:-/usr/bin/apptainer}"
 LLVM_ROOT="${LLVM_ROOT:-${REPO_ROOT}/llvm-infra/llvm-builds/apptainer-Debug}"
 LLVM_INSTALL_ROOT="${LLVM_INSTALL_ROOT:-${REPO_ROOT}/llvm-infra/llvm-installs/apptainer-Debug}"
 IOR_DIR="${IOR_DIR:-${REPO_ROOT}/application/ior-fork}"
-IOR_BIN="${IOR_BIN:-${IOR_DIR}/src/ior}"
+IOR_BIN="${IOR_BIN:-${IOR_DIR}/build/src/ior}"
 COMPARE_SCRIPT="${COMPARE_SCRIPT:-${IOR_DIR}/run_backend_compare.sh}"
 MPP_RUNNER="${MPP_RUNNER:-${IOR_DIR}/run_mpp_minimal.sh}"
 OMPFILE_INC="${OMPFILE_INC:-${LLVM_INSTALL_ROOT}/include}"
@@ -223,8 +223,12 @@ if [[ "${BUILD_IOR}" == "1" || ! -x "${IOR_BIN}" ]]; then
   # the container's system clang — resolving another clang's stdint.h via
   # CPATH breaks its include_next chain (unknown uint16_t/int64_t). The only
   # header IOR needs from the repo tree is file_interface.h, passed via -I.
+  # VPATH build into ${IOR_DIR}/build: application/**/build/ is excluded from
+  # the --delete source sync, so the binary persists across syncs. The old
+  # in-tree build (src/ior) was wiped by every sync and the rebuild's
+  # configure alone blew the 1800s case timeout on NFS (jobs 4186/4187).
   "${APPTAINER_BIN}" exec --userns --no-privs --bind "${APPTAINER_BIND_PATHS}" "${SIF_IMAGE}" \
-    bash -lc "${COMMON_ENV} && unset CPATH && cd ${IOR_DIR} && ./bootstrap && ./configure CC='mpicc -std=gnu11 -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L' CPPFLAGS='-I${OMPFILE_INC}' LDFLAGS='-L${OMPFILE_LIB}' && make -j"
+    bash -lc "${COMMON_ENV} && unset CPATH && cd ${IOR_DIR} && ./bootstrap && mkdir -p build && cd build && ../configure CC='mpicc -std=gnu11 -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L' CPPFLAGS='-I${OMPFILE_INC}' LDFLAGS='-L${OMPFILE_LIB}' && make -j"
 fi
 
 if [[ ! -x "${IOR_BIN}" ]]; then
