@@ -135,9 +135,17 @@ esac
 # pattern). IOR reports the check phases separately, so write/read bandwidth
 # numbers stay comparable with non-checked runs.
 IOR_DATA_CHECK="${IOR_DATA_CHECK:-0}"
+IOR_FSYNC="${IOR_FSYNC:-0}"
+if [[ ! "${IOR_FSYNC}" =~ ^[01]$ ]]; then
+  echo "Error: IOR_FSYNC must be 0 or 1, got '${IOR_FSYNC}'." >&2
+  exit 1
+fi
 if [[ "${IOR_DATA_CHECK}" == "1" ]]; then
   (( WRITE_ENABLED )) && IO_FLAGS="${IO_FLAGS} -W"
   (( READ_ENABLED )) && IO_FLAGS="${IO_FLAGS} -R"
+fi
+if [[ "${IOR_FSYNC}" == "1" ]]; then
+  IO_FLAGS="${IO_FLAGS} -e"
 fi
 
 # Layout posture: IOR_SHARED=1 drops -F (one shared file, ranks interleaved by
@@ -240,8 +248,14 @@ echo "[amd-ior-cmp] allocated nodes: ${SLURM_JOB_NODELIST}"
 # srun rejects --nodes greater than --ntasks: clamp so a lane can run fewer
 # ranks than the allocation has nodes (e.g. 9 writers on a 10-node job).
 SRUN_NODES=$(( COMPARE_TASKS < SLURM_JOB_NUM_NODES ? COMPARE_TASKS : SLURM_JOB_NUM_NODES ))
+SRUN_PLACEMENT=(--nodes="${SRUN_NODES}" --ntasks="${COMPARE_TASKS}")
+if (( SRUN_NODES == COMPARE_TASKS )); then
+  SRUN_PLACEMENT+=(--ntasks-per-node=1)
+else
+  SRUN_PLACEMENT+=(--distribution=block:block)
+fi
 echo "[amd-ior-cmp] workload: tasks=${COMPARE_TASKS} block=${COMPARE_BLOCK_SIZE} xfer=${COMPARE_TRANSFER_SIZE} segments=${COMPARE_SEGMENTS} iter=${COMPARE_ITERATIONS} rw=${COMPARE_RW}"
-echo "[amd-ior-cmp] runtime policy: scheduler=${OMPFILE_SCHEDULER} run_mpp=${OMPFILE_RUN_MPP} require_mpp=${OMPFILE_REQUIRE_MPP} fsync_policy=${OMPFILE_WRITETHROUGH_FSYNC_POLICY}"
+echo "[amd-ior-cmp] runtime policy: scheduler=${OMPFILE_SCHEDULER} run_mpp=${OMPFILE_RUN_MPP} require_mpp=${OMPFILE_REQUIRE_MPP} ompfile_fsync_policy=${OMPFILE_WRITETHROUGH_FSYNC_POLICY} ior_fsync=${IOR_FSYNC}"
 
 # Role script: every rank re-enters the container with the PMIx server bind
 # and the host-MPI lib override, then execs its target helper. Modeled on
@@ -299,7 +313,7 @@ EOF
   write_role_script "${role_path}" \
     "${mode_env_stmt}" \
     "run_in_container \"${COMPARE_OUTDIR}/exec-${tag}.sh\""
-  srun --kill-on-bad-exit=1 --mpi="${RUN_MPI_TYPE}" --nodes="${SRUN_NODES}" --ntasks="${COMPARE_TASKS}" --ntasks-per-node=1 \
+  srun --kill-on-bad-exit=1 --mpi="${RUN_MPI_TYPE}" "${SRUN_PLACEMENT[@]}" \
     "${role_path}" > "${log_file}" 2>&1
 }
 
@@ -350,7 +364,7 @@ else
   echo \"[amd-ior-cmp][rank-map] rank=\${SLURM_PROCID} role=proxy host=\$(hostname -s)\"
 fi
 run_in_container \"${COMPARE_OUTDIR}/exec-${tag}.sh\""
-  srun --kill-on-bad-exit=1 --mpi="${RUN_MPI_TYPE}" --nodes="${SRUN_NODES}" --ntasks="${COMPARE_TASKS}" --ntasks-per-node=1 \
+  srun --kill-on-bad-exit=1 --mpi="${RUN_MPI_TYPE}" "${SRUN_PLACEMENT[@]}" \
     "${role_path}" > "${log_file}" 2>&1
 }
 
