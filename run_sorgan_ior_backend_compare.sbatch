@@ -31,13 +31,16 @@ LLVM_INSTALL_ROOT="${LLVM_INSTALL_ROOT:-${REPO_ROOT}/llvm-infra/llvm-installs/ap
 IOR_DIR="${IOR_DIR:-${REPO_ROOT}/application/ior-fork}"
 IOR_BIN="${IOR_BIN:-${IOR_DIR}/build/src/ior}"
 COMPARE_SCRIPT="${COMPARE_SCRIPT:-${IOR_DIR}/run_backend_compare.sh}"
-MPP_RUNNER="${MPP_RUNNER:-${IOR_DIR}/run_mpp_minimal.sh}"
 OMPFILE_INC="${OMPFILE_INC:-${LLVM_INSTALL_ROOT}/include}"
 OMPFILE_LIB="${OMPFILE_LIB:-${LLVM_ROOT}/runtimes/runtimes-bins/openmp/libompfile}"
 OMP_RUNTIME_LIB="${OMP_RUNTIME_LIB:-${LLVM_ROOT}/runtimes/runtimes-bins/openmp/runtime/src}"
-PROXY_BIN="${PROXY_BIN:-${LLVM_ROOT}/bin/llvm-offload-mpi-proxy-device}"
 
-COMPARE_MODES_RAW="${IOR_COMPARE_MODES:-MPIIO,POSIX,OMPFILE_MPI}"
+# The OMPFILE arm of this lane is retired: it ran the real IOR binary, an MPI
+# program, as an origin of the MPP runtime. Under root AGENTS.md, "Benchmark
+# interface rule", a benchmark running under the runtime calls no MPI; the
+# runtime-side IOR workload is testior_target.cc in application/hacc-io-fork.
+# This lane is now the MPI baseline (MPIIO, POSIX) only.
+COMPARE_MODES_RAW="${IOR_COMPARE_MODES:-MPIIO,POSIX}"
 COMPARE_REPEATS="${IOR_COMPARE_REPEATS:-3}"
 COMPARE_BLOCK_SIZE="${IOR_COMPARE_BLOCK_SIZE:-4m}"
 COMPARE_TRANSFER_SIZE="${IOR_COMPARE_TRANSFER_SIZE:-256k}"
@@ -48,10 +51,7 @@ COMPARE_TASKS="${IOR_COMPARE_TASKS:-${SLURM_NTASKS}}"
 COMPARE_OUTDIR="${IOR_COMPARE_OUTDIR:-${IOR_DIR}/tmp/backend-compare-slurm-${SLURM_JOB_ID}}"
 COMPARE_CLEAN_DATA="${IOR_COMPARE_CLEAN_DATA:-1}"
 BUILD_IOR="${BUILD_IOR:-1}"
-OMPFILE_SCHEDULER="${IOR_OMPFILE_SCHEDULER:-${LIBOMPFILE_SCHEDULER:-HEADNODE}}"
 OMPFILE_WRITETHROUGH_FSYNC_POLICY="${IOR_OMPFILE_WRITETHROUGH_FSYNC_POLICY:-${LIBOMPFILE_WRITETHROUGH_FSYNC_POLICY:-each}}"
-OMPFILE_RUN_MPP="${IOR_OMPFILE_RUN_MPP:-0}"
-OMPFILE_REQUIRE_MPP="${IOR_OMPFILE_REQUIRE_MPP:-1}"
 
 assert_positive_int() {
   local value="$1"
@@ -66,14 +66,6 @@ assert_positive_int "${COMPARE_REPEATS}" "IOR_COMPARE_REPEATS"
 assert_positive_int "${COMPARE_SEGMENTS}" "IOR_COMPARE_SEGMENTS"
 assert_positive_int "${COMPARE_ITERATIONS}" "IOR_COMPARE_ITERATIONS"
 assert_positive_int "${COMPARE_TASKS}" "IOR_COMPARE_TASKS"
-if [[ ! "${OMPFILE_RUN_MPP}" =~ ^[01]$ ]]; then
-  echo "Error: IOR_OMPFILE_RUN_MPP must be 0 or 1, got '${OMPFILE_RUN_MPP}'." >&2
-  exit 1
-fi
-if [[ ! "${OMPFILE_REQUIRE_MPP}" =~ ^[01]$ ]]; then
-  echo "Error: IOR_OMPFILE_REQUIRE_MPP must be 0 or 1, got '${OMPFILE_REQUIRE_MPP}'." >&2
-  exit 1
-fi
 
 if [[ ! -e "${SIF_IMAGE}" ]]; then
   echo "Error: Apptainer image not found: ${SIF_IMAGE}" >&2
@@ -85,14 +77,6 @@ if [[ ! -x "${APPTAINER_BIN}" ]]; then
 fi
 if [[ ! -x "${COMPARE_SCRIPT}" ]]; then
   echo "Error: compare script not found: ${COMPARE_SCRIPT}" >&2
-  exit 1
-fi
-if [[ ! -x "${MPP_RUNNER}" ]]; then
-  echo "Error: MPP runner not found: ${MPP_RUNNER}" >&2
-  exit 1
-fi
-if [[ ! -x "${PROXY_BIN}" ]]; then
-  echo "Error: proxy binary not found: ${PROXY_BIN}" >&2
   exit 1
 fi
 
@@ -278,12 +262,6 @@ prepare_read_input() {
   local prep_nodes="${SLURM_JOB_NUM_NODES}"
   local prep_block_size="${COMPARE_BLOCK_SIZE}"
 
-  if [[ "${mode}" == "OMPFILE_MPI" && "${OMPFILE_RUN_MPP}" == "1" ]]; then
-    prep_tasks=1
-    prep_nodes=1
-    prep_block_size="$(scale_size_by_factor "${COMPARE_BLOCK_SIZE}" "${COMPARE_TASKS}")"
-  fi
-
   echo "[ior-backend-cmp] preparing read input with MPIIO writer -> ${data_path} mode=${mode} prep_tasks=${prep_tasks} prep_nodes=${prep_nodes} prep_block=${prep_block_size}"
   srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${prep_nodes}" --ntasks="${prep_tasks}" \
     "${APPTAINER_NODE_EXEC}" \
@@ -303,52 +281,12 @@ run_standard_case() {
     > "${log_file}" 2>&1
 }
 
-run_ompfile_mpp_case() {
-  local data_path="$1"
-  local log_file="$2"
-  local distributed_visible_ranks=$((COMPARE_TASKS - 1))
-  local ompfile_block_size_bytes
-
-  if (( distributed_visible_ranks < 1 )); then
-    echo "Error: distributed OMPFILE+MPP compare requires at least 2 total MPI tasks." >&2
-    exit 1
-  fi
-
-  ompfile_block_size_bytes="$(scale_size_by_factor "${COMPARE_BLOCK_SIZE}" "${COMPARE_TASKS}")"
-
-  srun --kill-on-bad-exit=1 --mpi=pmi2 --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${COMPARE_TASKS}" \
-    "${APPTAINER_NODE_EXEC}" \
-    bash -lc "${COMMON_ENV} && cd ${IOR_DIR} && \
-      export IOR_BIN=${IOR_BIN} && \
-      export PROXY_BIN=${PROXY_BIN} && \
-      export APP_RANK=$((SLURM_NTASKS - 1)) && \
-      export IOR_MPP_EXPECT_VISIBLE_DEVICES=${distributed_visible_ranks} && \
-      export PROXY_EXIT_TIMEOUT_SEC=${IOR_PROXY_EXIT_TIMEOUT_SEC:-20} && \
-      export LIBOMPFILE_BACKEND=MPI && \
-      export LIBOMPFILE_SCHEDULER=${OMPFILE_SCHEDULER} && \
-      export LIBOMPFILE_MPP_OPEN=1 && \
-      export LIBOMPFILE_MPP_IO=1 && \
-      export LIBOMPFILE_WRITETHROUGH_FSYNC_POLICY=${OMPFILE_WRITETHROUGH_FSYNC_POLICY} && \
-      export UCX_TLS=${UCX_TLS:-tcp,self} && \
-      export UCX_POSIX_USE_PROC_LINK=${UCX_POSIX_USE_PROC_LINK:-n} && \
-      export OMPFILE_EFFECTIVE_BLOCK_SIZE_BYTES=${ompfile_block_size_bytes} && \
-      export OMPFILE_IOR_ARGS='-a OMPFILE ${IO_FLAGS} -t ${COMPARE_TRANSFER_SIZE} -b ${ompfile_block_size_bytes} -s ${COMPARE_SEGMENTS} -i ${COMPARE_ITERATIONS} -F -o ${data_path}' && \
-      host_name=\$(hostname -s); \
-      if [ \"\${SLURM_PROCID}\" -eq \$((SLURM_NTASKS - 1)) ]; then \
-        echo \"[ior-backend-cmp][rank-map] rank=\${SLURM_PROCID} role=app host=\${host_name}\"; \
-      else \
-        echo \"[ior-backend-cmp][rank-map] rank=\${SLURM_PROCID} role=proxy host=\${host_name}\"; \
-      fi; \
-      bash ${MPP_RUNNER}" > "${log_file}" 2>&1
-}
-
 run_case() {
   local mode="$1"
   local repeat_id="$2"
   local api=""
   local backend="na"
   local mode_env_stmt=""
-  local mpp_enabled_for_case=0
 
   case "${mode}" in
     MPIIO)
@@ -360,27 +298,6 @@ run_case() {
       api="POSIX"
       backend="na"
       mode_env_stmt="unset LIBOMPFILE_BACKEND LIBOMPFILE_SCHEDULER LIBOMPFILE_MPP_OPEN LIBOMPFILE_MPP_IO LIBOMPFILE_MPP_PING LIBOMPFILE_OPT_TWO_PHASE LIBOMPFILE_OPT_OPEN_CACHE LIBOMPFILE_OPT_OPEN_CACHE_KEEP_OPEN LIBOMPFILE_OPT_STATS UCX_TLS UCX_POSIX_USE_PROC_LINK;"
-      ;;
-    OMPFILE_MPI)
-      api="OMPFILE"
-      backend="MPI"
-      mode_env_stmt="export LIBOMPFILE_BACKEND='MPI'; export LIBOMPFILE_SCHEDULER='${OMPFILE_SCHEDULER}'; export UCX_TLS='${UCX_TLS:-tcp,self}'; export UCX_POSIX_USE_PROC_LINK='${UCX_POSIX_USE_PROC_LINK:-n}';"
-      if [[ "${OMPFILE_RUN_MPP}" == "1" ]]; then
-        mode_env_stmt="${mode_env_stmt} export LIBOMPFILE_MPP_OPEN=1; export LIBOMPFILE_MPP_IO=1;"
-        mpp_enabled_for_case=1
-      else
-        mode_env_stmt="${mode_env_stmt} export LIBOMPFILE_MPP_OPEN=0; export LIBOMPFILE_MPP_IO=0;"
-      fi
-      ;;
-    OMPFILE_POSIX)
-      api="OMPFILE"
-      backend="POSIX"
-      mode_env_stmt="export LIBOMPFILE_BACKEND='POSIX'; unset LIBOMPFILE_SCHEDULER LIBOMPFILE_MPP_OPEN LIBOMPFILE_MPP_IO LIBOMPFILE_MPP_PING UCX_TLS UCX_POSIX_USE_PROC_LINK;"
-      ;;
-    OMPFILE_IO_URING)
-      api="OMPFILE"
-      backend="IO_URING"
-      mode_env_stmt="export LIBOMPFILE_BACKEND='IO_URING'; unset LIBOMPFILE_SCHEDULER LIBOMPFILE_MPP_OPEN LIBOMPFILE_MPP_IO LIBOMPFILE_MPP_PING UCX_TLS UCX_POSIX_USE_PROC_LINK;"
       ;;
     *)
       echo "Error: unsupported mode '${mode}' in IOR_COMPARE_MODES." >&2
@@ -400,12 +317,8 @@ run_case() {
     prepare_read_input "${data_path}" "${prep_log}" "${mode}"
   fi
 
-  echo "[ior-backend-cmp] mode=${mode} repeat=${repeat_id} mpp=${mpp_enabled_for_case}"
-  if [[ "${mode}" == "OMPFILE_MPI" && "${OMPFILE_RUN_MPP}" == "1" ]]; then
-    run_ompfile_mpp_case "${data_path}" "${log_file}"
-  else
-    run_standard_case "${mode_env_stmt}" "${api}" "${data_path}" "${log_file}"
-  fi
+  echo "[ior-backend-cmp] mode=${mode} repeat=${repeat_id}"
+  run_standard_case "${mode_env_stmt}" "${api}" "${data_path}" "${log_file}"
 
   if [[ "${IOR_DATA_CHECK}" == "1" ]] && grep -qiE "incorrect data|data check error" "${log_file}"; then
     echo "Error: IOR data check reported errors for mode ${mode} repeat=${repeat_id}" >&2
@@ -429,60 +342,6 @@ run_case() {
     read_s="$(extract_summary_field "${log_file}" "read" 10)"
   fi
 
-  if [[ "${api}" == "OMPFILE" ]]; then
-    sched_fallback_count="$(grep -c "HEADNODE scheduler request failed" "${log_file}" || true)"
-    mpp_shim_missing_count="$(grep -c "MPP shim not available" "${log_file}" || true)"
-    if (( sched_fallback_count > 0 )); then
-      flightplan_state="headnode_fallback_local"
-    elif (( mpp_shim_missing_count > 0 )); then
-      flightplan_state="headnode_no_shim"
-    else
-      flightplan_state="headnode_path_no_fallback_seen"
-    fi
-
-    if [[ "${mpp_enabled_for_case}" == "1" && "${OMPFILE_REQUIRE_MPP}" == "1" ]]; then
-      local mpp_init_fail_count
-      local mpp_open_failed_count
-      local mpp_shim_open_failed_count
-      local mpp_disabled_sched_count
-      local mpp_bootstrap_ok_count
-      local visible_rank_match_count
-      local short_read_count
-      local aggregate_warning_count
-      local aggregate_short_count
-      mpp_init_fail_count="$(grep -c "MPP scheduler request aborted because MPP init failed" "${log_file}" || true)"
-      mpp_open_failed_count="$(grep -c "MPP open failed" "${log_file}" || true)"
-      mpp_shim_open_failed_count="$(grep -c "MPP shim open failed" "${log_file}" || true)"
-      mpp_disabled_sched_count="$(grep -c "HEADNODE scheduler requested but MPP remote-only mode is disabled" "${log_file}" || true)"
-      mpp_bootstrap_ok_count="$(grep -Ec "\\[ior-mpp\\] libomptarget bootstrap completed" "${log_file}" || true)"
-      visible_rank_match_count="$(grep -Ec "\\[ior-mpp\\] visible_distributed_ranks=$((COMPARE_TASKS - 1)) expected_visible=$((COMPARE_TASKS - 1))" "${log_file}" || true)"
-      short_read_count="$(grep -Ec "short_reads=[1-9][0-9]*" "${log_file}" || true)"
-      aggregate_warning_count="$(grep -c "Expected aggregate file size" "${log_file}" || true)"
-      # On NFS the app-side stat can lag split-role writes issued from other
-      # nodes (stale attribute cache reports size 0) while IOR confirms every
-      # byte moved. Only treat the warning as fatal when the actual bytes
-      # moved differ from the expected aggregate.
-      aggregate_short_count="$(awk '
-        /Expected aggregate file size/ {expv=$NF; have=1}
-        /Using actual aggregate bytes moved/ {if (have && $NF+0 != expv+0) bad++; have=0}
-        END {print bad+0}' "${log_file}")"
-      local remote_only_open_count
-      remote_only_open_count="$(grep -c "Remote-only open completed" "${log_file}" || true)"
-      # Planned MPP open can transiently fail on a write-first flow (the
-      # planned open carries no O_CREAT, so it ENOENTs before the file
-      # exists) and fall back to the default open path — the run is still
-      # remote-only MPP as long as a remote-only open completed. Only treat
-      # open failures as fatal when no remote-only open ever completed.
-      if (( (mpp_open_failed_count > 0 || mpp_shim_open_failed_count > 0) && remote_only_open_count > 0 )); then
-        echo "[ior-cmp] warning: planned MPP open fell back (open_fail=${mpp_open_failed_count} shim_open_fail=${mpp_shim_open_failed_count}) but remote-only open completed (${remote_only_open_count}); continuing."
-      fi
-      if (( mpp_init_fail_count > 0 || ((mpp_open_failed_count > 0 || mpp_shim_open_failed_count > 0) && remote_only_open_count == 0) || mpp_shim_missing_count > 0 || mpp_disabled_sched_count > 0 || mpp_bootstrap_ok_count == 0 || visible_rank_match_count == 0 || short_read_count > 0 || aggregate_short_count > 0 )); then
-        echo "Error: OMPFILE+MPP strict mode failed for ${mode} repeat=${repeat_id}." >&2
-        echo "  bootstrap_ok=${mpp_bootstrap_ok_count} visible_match=${visible_rank_match_count} init_fail=${mpp_init_fail_count} open_fail=${mpp_open_failed_count} shim_open_fail=${mpp_shim_open_failed_count} shim_missing=${mpp_shim_missing_count} sched_disabled=${mpp_disabled_sched_count} short_reads=${short_read_count} aggregate_warnings=${aggregate_warning_count} aggregate_short=${aggregate_short_count}" >&2
-        exit 1
-      fi
-    fi
-  fi
   if (( WRITE_ENABLED )) && [[ -z "${write_bw}" || -z "${write_s}" ]]; then
     echo "Error: failed to parse write summary metrics from ${log_file}" >&2
     exit 1
@@ -515,18 +374,7 @@ run_case() {
 echo "[ior-backend-cmp] output dir: ${COMPARE_OUTDIR}"
 echo "[ior-backend-cmp] modes: ${COMPARE_MODES_RAW}"
 echo "[ior-backend-cmp] workload: tasks=${COMPARE_TASKS} block=${COMPARE_BLOCK_SIZE} xfer=${COMPARE_TRANSFER_SIZE} segments=${COMPARE_SEGMENTS} iter=${COMPARE_ITERATIONS} rw=${COMPARE_RW}"
-echo "[ior-backend-cmp] runtime policy: ompfile_scheduler=${OMPFILE_SCHEDULER} ompfile_run_mpp=${OMPFILE_RUN_MPP} ompfile_require_mpp=${OMPFILE_REQUIRE_MPP}"
-if [[ "${MODE_LIST_CSV}" == *",OMPFILE_MPI,"* && "${OMPFILE_RUN_MPP}" == "1" ]]; then
-  echo "[ior-backend-cmp] topology: MPIIO/POSIX run IOR on all ${COMPARE_TASKS} MPI ranks; OMPFILE+MPP runs 1 app rank + $((COMPARE_TASKS - 1)) proxy ranks in the same MPI_COMM_WORLD."
-else
-  echo "[ior-backend-cmp] topology: this script launches IOR on all MPI ranks (no dedicated proxy ranks)."
-fi
-if [[ "${OMPFILE_RUN_MPP}" == "0" ]]; then
-  echo "[ior-backend-cmp] note: OMPFILE mode runs without remote-only MPP in this compare lane."
-fi
-if [[ "${OMPFILE_RUN_MPP}" == "1" ]]; then
-  echo "[ior-backend-cmp] note: strict MPP mode is enabled for OMPFILE runs; failures in bootstrap/open/init will abort."
-fi
+echo "[ior-backend-cmp] topology: this script launches IOR on all MPI ranks as the MPI baseline (no proxy ranks)."
 
 IFS=',' read -r -a MODES <<< "${COMPARE_MODES_RAW}"
 for raw_mode in "${MODES[@]}"; do

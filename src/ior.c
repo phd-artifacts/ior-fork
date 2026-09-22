@@ -20,7 +20,6 @@
 #include <math.h>
 #include <mpi.h>
 #include <string.h>
-#include <dlfcn.h>
 
 #if defined(HAVE_STRINGS_H)
 #include <strings.h>
@@ -70,49 +69,6 @@ static void ValidateTests(IOR_param_t * params, MPI_Comm com);
 static IOR_offset_t WriteOrRead(IOR_param_t *test, int rep, IOR_results_t *results,
                                 aiori_fd_t *fd, const int access,
                                 IOR_io_buffers *ioBuffers);
-
-static void BootstrapOpenMPRuntimeForMPP(void) {
-  typedef int (*omp_get_num_devices_fn_t)(void);
-  omp_get_num_devices_fn_t GetNumDevices =
-      (omp_get_num_devices_fn_t)dlsym(RTLD_DEFAULT, "omp_get_num_devices");
-
-  void *OmpHandle = NULL;
-  if (!GetNumDevices) {
-    OmpHandle = dlopen("libomp.so", RTLD_NOW | RTLD_GLOBAL);
-    if (!OmpHandle)
-      OmpHandle = dlopen("libomp.so.5", RTLD_NOW | RTLD_GLOBAL);
-    if (OmpHandle) {
-      GetNumDevices =
-          (omp_get_num_devices_fn_t)dlsym(OmpHandle, "omp_get_num_devices");
-    }
-  }
-
-  if (!GetNumDevices)
-    return;
-
-  int NumDevices = GetNumDevices();
-  fprintf(out_logfile, "[ior-mpp] omp_get_num_devices=%d\n", NumDevices);
-}
-
-static int envEnabled(const char *Name) {
-  const char *Value = getenv(Name);
-  return Value != NULL && Value[0] == '1' && Value[1] == '\0';
-}
-
-static const char *mpiThreadLevelToString(int Level) {
-  switch (Level) {
-  case MPI_THREAD_SINGLE:
-    return "MPI_THREAD_SINGLE";
-  case MPI_THREAD_FUNNELED:
-    return "MPI_THREAD_FUNNELED";
-  case MPI_THREAD_SERIALIZED:
-    return "MPI_THREAD_SERIALIZED";
-  case MPI_THREAD_MULTIPLE:
-    return "MPI_THREAD_MULTIPLE";
-  default:
-    return "MPI_THREAD_UNKNOWN";
-  }
-}
 
 static void ior_set_xfer_hints(IOR_param_t * p){
   aiori_xfer_hint_t * hints = & p->hints;
@@ -229,58 +185,17 @@ IOR_test_t * ior_run(int argc, char **argv, MPI_Comm world_com, FILE * world_out
 }
 
 
-
 int ior_main(int argc, char **argv)
 {
     IOR_test_t *tests_head;
     IOR_test_t *tptr;
     MPI_Comm ior_comm = MPI_COMM_WORLD;
-    int skip_mpi_finalize = 0;
-    const char *ior_comm_self_env = NULL;
-    int world_rank = 0;
-    int required_thread_level = MPI_THREAD_SINGLE;
-    int provided_thread_level = MPI_THREAD_SINGLE;
 
     out_logfile = stdout;
     out_resultfile = stdout;
 
-    if (envEnabled("LIBOMPFILE_MPP_OPEN") && envEnabled("LIBOMPFILE_MPP_IO"))
-        required_thread_level = MPI_THREAD_MULTIPLE;
-
     /* start the MPI code */
-    MPI_CHECK(MPI_Init_thread(&argc, &argv, required_thread_level,
-                              &provided_thread_level),
-              "cannot initialize MPI");
-
-    if (required_thread_level == MPI_THREAD_MULTIPLE &&
-        provided_thread_level < MPI_THREAD_MULTIPLE) {
-            fprintf(stderr,
-                    "[ior-mpp] error: MPI thread level is %s, but "
-                    "LIBOMPFILE_MPP_OPEN=1 and LIBOMPFILE_MPP_IO=1 require %s.\n",
-                    mpiThreadLevelToString(provided_thread_level),
-                    mpiThreadLevelToString(MPI_THREAD_MULTIPLE));
-            MPI_Abort(MPI_COMM_WORLD, 1);
-    }
-
-    MPI_CHECK(MPI_Comm_rank(MPI_COMM_WORLD, &world_rank),
-              "cannot get rank");
-
-    /* MPP prototype mode:
-     * keep process in the full MPI world for libompfile MPP transport,
-     * but run IOR collectives on MPI_COMM_SELF to avoid waiting on proxy ranks.
-     */
-    ior_comm_self_env = getenv("IOR_MPI_COMM_SELF");
-    if (ior_comm_self_env != NULL &&
-        ior_comm_self_env[0] == '1' &&
-        ior_comm_self_env[1] == '\0') {
-            const char *bootstrap_env = getenv("IOR_MPP_BOOTSTRAP_OMP");
-            ior_comm = MPI_COMM_SELF;
-            skip_mpi_finalize = 1;
-            if (bootstrap_env != NULL && bootstrap_env[0] == '1' &&
-                bootstrap_env[1] == '\0') {
-                    BootstrapOpenMPRuntimeForMPP();
-            }
-    }
+    MPI_CHECK(MPI_Init(&argc, &argv), "cannot initialize MPI");
 
     MPI_CHECK(MPI_Comm_rank(ior_comm, &rank), "cannot get rank");
 
@@ -324,13 +239,7 @@ int ior_main(int argc, char **argv)
     /* display finish time */
     PrintTestEnds();
 
-    if (!skip_mpi_finalize) {
-            MPI_CHECK(MPI_Finalize(), "cannot finalize MPI");
-    } else if (rank == 0) {
-            fprintf(out_logfile,
-                    "[ior-mpp] IOR_MPI_COMM_SELF=1 active; skipping MPI_Finalize in app rank (world rank %d)\n",
-                    world_rank);
-    }
+    MPI_CHECK(MPI_Finalize(), "cannot finalize MPI");
 
     DestroyTests(tests_head);
 
@@ -680,7 +589,6 @@ char * GetPlatformName()
 }
 
 
-
 /*
  * Parse file name.
  */
@@ -1008,7 +916,6 @@ static void XferBuffersFree(IOR_io_buffers* ioBuffers, IOR_param_t* test)
 {
         aligned_buffer_free(ioBuffers->buffer, test->gpuMemoryFlags);
 }
-
 
 
 /*

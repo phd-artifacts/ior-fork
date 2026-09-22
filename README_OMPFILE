@@ -81,12 +81,7 @@ override, same summary-CSV contract; `rw`/`write` only — no read-prep pass).
 Both wrappers build IOR in-container with `unset CPATH` (the repo clang's
 resource headers on CPATH break the system compiler's stdint include chain)
 and pass `CPPFLAGS`/`LDFLAGS` as `./configure` arguments so the libompfile
-include/lib survive to `make`. The OMPFILE strict-MPP gate tolerates
-planned-open fallbacks when a remote-only open completed, and treats IOR's
-"Expected aggregate file size" warning as fatal only when the actual bytes
-moved differ (an app-side NFS stat can lag split-role writes from other
-nodes). Proxy lifetime is `IOR_PROXY_EXIT_TIMEOUT_SEC` (sorgan default 20,
-AMD 60) — it must exceed the app's total I/O time per case.
+include/lib survive to `make`.
 
 Inspect output:
 
@@ -95,36 +90,27 @@ sacct -j <job_id> --format=JobID,State,Elapsed,ExitCode
 grep -E '\[ior-backend-cmp\]|Summary of all tests|api                 :' ior-backend-cmp-<job_id>.out
 ```
 
-## MPP prototype run (one app rank + proxy ranks)
+## The OMPFILE arm is retired
 
-Use one IOR app rank plus proxy ranks in the same MPI world.
+IOR runs here as the **MPI baseline** only (`MPIIO`, `POSIX`). The lane used
+to have a split-role `OMPFILE_MPI` arm: one IOR app rank plus proxy ranks in
+one MPI world, with IOR's own collectives pushed onto `MPI_COMM_SELF`
+(`IOR_MPI_COMM_SELF=1`) so they would not wait on the proxies.
 
-Key behavior in this prototype:
+That arm is gone. Under root `AGENTS.md`, "Benchmark interface rule", a
+benchmark running under the runtime calls no MPI at all: it expresses its
+work as target regions issuing `omp_file_*` and takes any coordination from
+MPP primitives. The `MPI_COMM_SELF` construction was the opposite — the
+benchmark reading `LIBOMPFILE_MPP_*`, raising its own MPI thread level and
+dodging the proxy ranks. It also measured the wrong thing: every byte was
+issued from the single app rank, so the number was the app-rank transport,
+not the I/O path.
 
-- App rank runs IOR with `IOR_MPI_COMM_SELF=1`.
-- Proxy ranks run `llvm-offload-mpi-proxy-device`.
-- This avoids IOR collectives blocking on proxy ranks.
+The runtime-side IOR workload is `testior_target.cc` in
+`application/hacc-io-fork`, which replicates IOR's `-F`, shared-file and
+`-C`/reorderTasks access geometry with each writer inside
+`#pragma omp target device(d)`. It is what both published IOR rows in
+`docs/benchmark-results.md` were measured with.
 
-Slurm example:
-
-```bash
-sbatch /scratch/rodrigo.freitas/io-playground/application/ior-fork/run_sorgan_ior_mpp_minimal.sbatch
-```
-
-## MPI plan / execution flow
-
-1. Start one MPI job with `N` ranks.
-2. Reserve rank `N-1` as app rank; all lower ranks become proxy ranks.
-3. App rank executes IOR (`-a OMPFILE`) with `IOR_MPI_COMM_SELF=1`.
-4. Proxy ranks execute `llvm-offload-mpi-proxy-device`.
-5. libompfile MPP path routes OMPFILE operations from the app rank to proxy workers.
-
-## Current limitations
-
-- This is a minimal prototype for integration and bring-up.
-- IOR MPI collectives are intentionally scoped to `MPI_COMM_SELF` in MPP mode.
-- Performance/scaling results from this mode are not yet representative of full
-  multi-rank IOR semantics.
-- Current split-role MPP runs still fail in pure IOR processes with
-  `ompfile_mpp_init rc=-1` (`ActiveMPIPlugin` initialization path unresolved
-  without an offload-enabled app/runtime bootstrap).
+`src/aiori-ompfile.c` is kept: it calls no MPI and is the natural starting
+point if IOR itself is ever ported to issue its writers as target regions.
