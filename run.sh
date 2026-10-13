@@ -11,7 +11,6 @@ OMP_RUNTIME_LIB="${OMP_RUNTIME_LIB:-${LLVM_BUILD_ROOT}/runtimes/runtimes-bins/op
 
 echo "Using clang:"
 /usr/bin/which clang
-export LIBOMPFILE_SCHEDULER="${LIBOMPFILE_SCHEDULER:-HEADNODE}"
 export LD_LIBRARY_PATH="/usr/local/mpich/lib:${OMP_RUNTIME_LIB}:${OMPFILE_LIB}:${LD_LIBRARY_PATH:-}"
 
 # Check if block_size or ior_mode are undefined or empty
@@ -62,23 +61,8 @@ elif [ "${ior_mode}" = "posix" ]; then
 
   mpirun -n 1 ./src/ior -a POSIX $read_or_write_flag -b $block_size -t 16k -s 100 -o ./tmp/$output_prefix_$block_size.dat
 
-elif [ "${ior_mode}" = "ompfile_posix" ]; then
-  echo "IOR mode: OMPFile POSIX"
-  export LIBOMPFILE_BACKEND=POSIX
-  mpirun -n 1 ./src/ior -a OMPFILE $read_or_write_flag -b $block_size -t 16k -s 100 -o ./tmp/$output_prefix_$block_size.dat
-
-elif [ "${ior_mode}" = "ompfile_io_uring" ]; then
-  echo "IOR mode: OMPFile IO_URING"
-  export LIBOMPFILE_BACKEND="IO_URING"
-  mpirun -n 1 ./src/ior -a OMPFILE $read_or_write_flag -b $block_size -t 16k -s 100 -o ./tmp/$output_prefix_$block_size.dat
-
-elif [ "${ior_mode}" = "ompfile_mpi_io" ]; then
-  echo "IOR mode: OMPFile MPI I/O"
-  export LIBOMPFILE_BACKEND="MPI"
-  mpirun -n 1 ./src/ior -a OMPFILE $read_or_write_flag -b $block_size -t 16k -s 100 -o ./tmp/$output_prefix_$block_size.dat
-
 else
-  echo "Error: Invalid IOR mode '${ior_mode}'. Valid options are: mpiio, posix, ompfile_posix, ompfile_io_uring, ompfile_mpi_io."
+  echo "Error: Invalid IOR mode '${ior_mode}'. Valid options are: mpiio, posix (the ompfile_* modes are retired; see README_OMPFILE)."
   exit 1
 fi
 

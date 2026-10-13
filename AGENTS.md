@@ -11,7 +11,7 @@ Local IOR fork integration used by io-playground.
 ## Relevant files
 
 - OMPFile backend adapter: `src/aiori-ompfile.c`
-- Local runner: `run.sh`
+- Local runner: `run.sh` (MPI baseline modes `mpiio` / `posix` only)
 - Fork docs: `README_OMPFILE`
 
 ## Scope-specific behavior
@@ -21,9 +21,13 @@ Local IOR fork integration used by io-playground.
   on Sep 22, 2026: under root `AGENTS.md`, "Benchmark interface rule", a
   benchmark running under the runtime calls no MPI. The runtime-side IOR
   workload is `testior_target.cc` in `application/hacc-io-fork`. Do not
-  reintroduce an arm that runs this binary under MPP.
-- `src/aiori-ompfile.c` is kept (it calls no MPI) as the starting point for a
-  future port that issues IOR's writers as target regions.
+  reintroduce an arm that runs this binary under MPP. The `ompfile_posix` /
+  `ompfile_io_uring` / `ompfile_mpi_io` modes of `run.sh` went in Oct 2026
+  with libompfile's non-MPP backends, and `run.sh` exports no
+  `LIBOMPFILE_*` knob any more.
+- `src/aiori-ompfile.c` is kept, unchanged and unused (it calls no MPI), as
+  the starting point for a future port that issues IOR's writers as target
+  regions.
 - When this fork changes runtime behavior used in cluster decisions, capture
   observed deltas in docs via the root MkDocs policy.
 
